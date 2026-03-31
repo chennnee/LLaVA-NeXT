@@ -31,6 +31,7 @@ def maybe_zero_3(param, ignore_status=False, name=None):
     from deepspeed import zero
     from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 
+    # ZeRO-3 下参数可能是分片状态；保存权重前先临时聚合，再拷到 CPU。
     if hasattr(param, "ds_id"):
         if param.ds_status == ZeroParamStatus.NOT_AVAILABLE:
             if not ignore_status:
@@ -43,6 +44,7 @@ def maybe_zero_3(param, ignore_status=False, name=None):
 
 
 def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
+    # 只导出多模态适配器相关参数，并兼容 ZeRO-3 的分片参数收集。
     to_return = {k: t for k, t in named_params if any(key_match in k for key_match in keys_to_match)}
     to_return = {k: maybe_zero_3(v, ignore_status=True, name=k).cpu() for k, v in to_return.items()}
     return to_return
@@ -104,6 +106,8 @@ def get_modality_length_grouped_indices(lengths, batch_size, world_size, generat
     if all(l > 0 for l in lengths) or all(l < 0 for l in lengths):
         # all samples are in the same modality
         return get_length_grouped_indices(lengths, batch_size, world_size, generator=generator)
+    # 这里约定：正长度表示多模态样本，负长度表示纯文本样本。
+    # 先分别按长度分桶，再在 megabatch 级别打散，减少不同模态混排带来的 padding 浪费。
     mm_indices, mm_lengths = zip(*[(i, l) for i, l in enumerate(lengths) if l > 0])
     lang_indices, lang_lengths = zip(*[(i, -l) for i, l in enumerate(lengths) if l < 0])
 
@@ -170,6 +174,7 @@ def get_modality_length_grouped_indices_auto(lengths, batch_size, world_size, ge
     if all(l > 0 for l in lengths) or all(l < 0 for l in lengths):
         # all samples are in the same modality
         return get_length_grouped_indices_auto_single(lengths, batch_size, world_size, generator=generator)
+    # auto 版本沿用同样的正负号约定，只是每种模态内部改用 HF 自带的长度分组实现。
     mm_indices, mm_lengths = zip(*[(i, l) for i, l in enumerate(lengths) if l > 0])
     lang_indices, lang_lengths = zip(*[(i, -l) for i, l in enumerate(lengths) if l < 0])
 
@@ -224,6 +229,7 @@ class LengthGroupedSampler(Sampler):
         return len(self.lengths)
 
     def __iter__(self):
+        # 根据训练参数选择一种分组采样策略，核心目标都是让同一批次的样本长度更接近。
         if self.variable_length:
             assert not self.group_by_modality, "Variable length grouping is not supported with modality grouping."
             indices = get_variable_length_grouped_indices(self.lengths, self.batch_size, self.world_size, generator=self.generator)
@@ -264,6 +270,7 @@ class LLaVATrainer(Trainer):
 
         self.batch_zo_seeds = None
 
+        # MeZO 只会操作真正需要更新的参数，提前缓存避免训练时反复遍历整个模型。
         self.trainable_params = [(p[0], p[1]) for p in self.model.named_parameters() if p[1].requires_grad]
 
         print(f"Trainable parameters amount: {len(self.trainable_params)}")
@@ -272,6 +279,7 @@ class LLaVATrainer(Trainer):
             raise ValueError("No trainable parameters found.")
 
         if self.trainer_mode == "zo":
+            # 零阶优化不依赖 autograd，这里统一关掉 requires_grad 以减少显存和误用风险。
             for param in self.model.parameters():
                 param.requires_grad = False  # Ensure no accidental gradient computation
 
@@ -288,6 +296,7 @@ class LLaVATrainer(Trainer):
         Args:
             scaling_factor (float): Scaling factor for the perturbation.
         """
+        # 固定随机种子，确保 +eps 和 -eps 使用的是同一个随机方向 z。
         torch.manual_seed(self.zo_random_seed)
         for name, param in self.trainable_params:
             z = torch.normal(
@@ -307,6 +316,7 @@ class LLaVATrainer(Trainer):
         Returns:
             torch.Tensor: The computed loss.
         """
+        # MeZO 只需要函数值，不需要梯度，因此直接走 inference_mode。
         model.eval()
         with torch.inference_mode():
             inputs = self._prepare_inputs(inputs)
@@ -330,21 +340,26 @@ class LLaVATrainer(Trainer):
         directions = []
 
         if self.batch_zo_seeds is None:
+            # 一个梯度累积窗口内复用同一组方向，便于后面统一聚合更新。
             self.batch_zo_seeds = [np.random.randint(1000000000) for _ in range(self.zo_num_directions)]
             print(f"Sampled batch seeds: {self.batch_zo_seeds}")
 
         for seed in self.batch_zo_seeds:
             self.zo_random_seed = seed
 
+            # 先算 f(theta + eps * z)。
             self.zo_perturb_parameters(scaling_factor=1.0)
             loss_plus = self.zo_forward(model, inputs)
 
+            # 从 +eps*z 一步切到 -eps*z，避免重新生成参数副本。
             self.zo_perturb_parameters(scaling_factor=-2.0)
             loss_minus = self.zo_forward(model, inputs)
             print(f"Seed {seed} loss_plus: {loss_plus} loss_minus: {loss_minus}")
 
+            # 还原回原始参数，方便下一个随机方向继续估计。
             self.zo_perturb_parameters(scaling_factor=1.0)
 
+            # 用中心差分近似这个方向上的梯度投影。
             grad_estimate = ((loss_plus - loss_minus) / (2 * self.zo_eps)).item()
 
             directions.append((seed, grad_estimate))
@@ -375,6 +390,7 @@ class LLaVATrainer(Trainer):
             return
 
         seed_group = {}
+        # 把一个累积窗口里相同 seed 的方向导数先合并，再做一次显式参数更新。
         for seed, grad_estimate in self.zo_direction_accumulator:
             if seed in seed_group:
                 seed_group[seed] += grad_estimate / (self.args.gradient_accumulation_steps * self.zo_num_directions)
@@ -382,6 +398,7 @@ class LLaVATrainer(Trainer):
                 seed_group[seed] = grad_estimate / (self.args.gradient_accumulation_steps * self.zo_num_directions)
 
         for seed, grad_sum in seed_group.items():
+            # 重新设 seed 就能复现当时的随机方向 z，从而把方向导数映射回参数更新。
             torch.manual_seed(seed)
 
             for name, param in self.trainable_params:
@@ -446,9 +463,11 @@ class LLaVATrainer(Trainer):
 
     def create_accelerator_and_postprocess(self):
         grad_acc_kwargs = {"num_steps": self.args.gradient_accumulation_steps}
+        # 把是否同步梯度的时机交给训练循环控制，而不是由 dataloader 边界触发。
         grad_acc_kwargs["sync_with_dataloader"] = False
         gradient_accumulation_plugin = GradientAccumulationPlugin(**grad_acc_kwargs)
 
+        # 多机多卡训练时间可能很长，这里把进程组超时设得非常大，避免 NCCL 提前断开。
         accelerator_kwargs = InitProcessGroupKwargs(timeout=timedelta(weeks=52))
         rank0_print("Setting NCCL timeout to INF to avoid running errors.")
 
@@ -485,6 +504,7 @@ class LLaVATrainer(Trainer):
                 # self.args.train_batch_size * self.args.gradient_accumulation_steps, # TODO: seems that we should not have gradient_accumulation_steps
                 self.args.train_batch_size,
                 # world_size=self.args.world_size,
+                # 这里把梯度累积也算进“全局 batch”，让分桶更贴近真实训练时的批次形状。
                 world_size=self.args.world_size * self.args.gradient_accumulation_steps,  # TODO: seems that this may work?
                 lengths=lengths,
             )
@@ -569,6 +589,7 @@ class LLaVATrainer(Trainer):
             # Create a dummy optimizer with this dummy parameter.
             # This optimizer will never really be stepped using backprop gradients.
             # We use no optimizer for MeZO. All updates are done in the `zo` methods.
+            # 保留一个假的 optimizer，主要是为了兼容 Trainer / DeepSpeed 的调用链。
             dummy_param = torch.nn.Parameter(torch.zeros(1, device=self.args.device))
             self.optimizer = torch.optim.AdamW([dummy_param], lr=self.args.learning_rate)
             return self.optimizer
@@ -587,6 +608,7 @@ class LLaVATrainer(Trainer):
             if self.args.mm_vision_tower_lr is not None:
                 lr_mapper["vision_tower"] = self.args.mm_vision_tower_lr
             if len(lr_mapper) > 0:
+                # 给 projector / vision tower 单独学习率，其余参数仍走默认学习率。
                 special_lr_parameters = [name for name, _ in opt_model.named_parameters() if any(module_keyword in name for module_keyword in lr_mapper)]
                 optimizer_grouped_parameters = [
                     {
@@ -661,6 +683,7 @@ class LLaVATrainer(Trainer):
             if getattr(self.args, "use_im_start_end", False):
                 keys_to_match.extend(["embed_tokens", "embed_in"])
 
+            # 如果当前只是训练适配器，就没必要保存一整份完整模型权重。
             weight_to_save = get_mm_adapter_state_maybe_zero_3(self.model.named_parameters(), keys_to_match)
 
             if self.args.local_rank == 0 or self.args.local_rank == -1:
@@ -770,17 +793,12 @@ class LLaVATrainer(Trainer):
             self._created_lr_scheduler = False
 
         if self.is_deepspeed_enabled:
-            ########################
-            # Changed Code
-            ########################
+            # DeepSpeed 仍然要求 trainer 持有 optimizer，但在 zo 模式下真正的参数更新
+            # 不是 optimizer.step() 完成的，而是后面的 zo_update() 手动完成。
             if self.trainer_mode == "zo":
-                # We need to set the optimizer to dummy optimizer for MeZO
                 self.optimizer = self.create_optimizer()
             else:
                 self.optimizer, self.lr_scheduler = deepspeed_init(self, num_training_steps=max_steps)
-            ########################
-            # Changed Code
-            ########################
 
         if not delay_optimizer_creation:
             self.create_optimizer_and_scheduler(num_training_steps=max_steps)
@@ -1025,22 +1043,16 @@ class LLaVATrainer(Trainer):
                 if step % args.gradient_accumulation_steps == 0:
                     self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
 
-                ########################
-                # MeZO Integration
-                ########################
                 if self.trainer_mode == "zo":
-                    # Perform MeZO step
+                    # zo 模式下不用 backward，而是做两次前向估计当前方向上的梯度。
                     tr_loss_step = self.zo_step(model, inputs)
                 else:
-                    # Regular training step with gradient accumulation
+                    # 常规模式保持 Hugging Face Trainer 的反向传播逻辑不变。
                     with self.accelerator.accumulate(model):
                         tr_loss_step = self.training_step(model, inputs)
                         print(f"Step {step} loss: {tr_loss_step}")
 
                 torch.cuda.empty_cache()  # Releasing reserved memory seems not to work correctly, so do it manually
-                ########################
-                # End of MeZO Integration
-                ########################
 
                 # Accumulate loss
                 if (
@@ -1069,15 +1081,10 @@ class LLaVATrainer(Trainer):
                     # last step in epoch but step is always smaller than gradient_accumulation_steps
                     is_last_step_and_steps_less_than_grad_acc
                 ):
-                    ########################
-                    # MeZO Integration
-                    ########################
                     if self.trainer_mode == "zo":
+                        # 只有一个梯度累积窗口结束后，才真正把累计的方向导数转成参数更新。
                         self.zo_update(learning_rate=self._get_learning_rate())
                         self.lr_scheduler.step()
-                    ########################
-                    # End of MeZO Integration
-                    ########################
                     else:
                         # the `or` condition of `is_last_step_and_steps_less_than_grad_acc` is not covered
                         # in accelerate. So, explicitly enable sync gradients to True in that case.

@@ -32,8 +32,10 @@ import random
 
 
 class LlavaMetaModel:
+    # 定义多模态模型的视觉组件初始化与管理逻辑。
 
     def __init__(self, config):
+        # 根据配置构建视觉塔、视觉重采样器和多模态投影层。
         super(LlavaMetaModel, self).__init__(config)
 
         if hasattr(config, "mm_vision_tower"):
@@ -46,12 +48,14 @@ class LlavaMetaModel:
                 self.image_newline = nn.Parameter(torch.empty(config.hidden_size, dtype=self.dtype))
 
     def get_vision_tower(self):
+        # 返回当前模型实际持有的视觉编码器实例。
         vision_tower = getattr(self, "vision_tower", None)
         if type(vision_tower) is list:
             vision_tower = vision_tower[0]
         return vision_tower
 
     def initialize_vision_modules(self, model_args, fsdp=None):
+        # 按训练参数初始化或加载视觉模块，并把相关配置写回模型配置。
         vision_tower = model_args.vision_tower
         mm_vision_select_layer = model_args.mm_vision_select_layer
         mm_vision_select_feature = model_args.mm_vision_select_feature
@@ -125,6 +129,7 @@ class LlavaMetaModel:
 
 
 def unpad_image(tensor, original_size):
+    # 按原始图片尺寸去掉补边区域，恢复有效视觉内容。
     """
     Unpads a PyTorch tensor of a padded and resized image.
 
@@ -160,15 +165,19 @@ def unpad_image(tensor, original_size):
 
 
 class LlavaMetaForCausalLM(ABC):
+    # 定义多模态因果语言模型需要实现的公共接口与输入拼接逻辑。
 
     @abstractmethod
     def get_model(self):
+        # 返回底层语言模型主体，供多模态逻辑调用。
         pass
 
     def get_vision_tower(self):
+        # 通过底层模型获取视觉编码器。
         return self.get_model().get_vision_tower()
 
     def get_2dPool(self, image_feature, stride=2):
+        # 对二维视觉特征做空间池化，减少视觉 token 数量。
         height = width = self.get_vision_tower().num_patches_per_side
         num_frames, num_tokens, num_dim = image_feature.shape
         image_feature = image_feature.view(num_frames, height, width, -1)
@@ -190,12 +199,14 @@ class LlavaMetaForCausalLM(ABC):
         return image_feature
 
     def encode_images(self, images):
+        # 先用视觉塔提取图像特征，再映射到语言模型隐藏空间。
         image_features = self.get_model().get_vision_tower()(images)
         # image_features = self.get_model().vision_resampler(image_features, images=images)
         image_features = self.get_model().mm_projector(image_features)
         return image_features
     
     def encode_multimodals(self, videos_or_images, video_idx_in_batch, split_sizes=None):
+        # 编码图像或视频特征，并为视频样本生成慢速/快速两路视觉表示。
         videos_or_images_features = self.get_model().get_vision_tower()(videos_or_images)
         per_videos_or_images_features = torch.split(videos_or_images_features, split_sizes, dim=0)  # tuple, (dim_1, 576, 4096)
         all_videos_or_images_features = []
@@ -220,6 +231,7 @@ class LlavaMetaForCausalLM(ABC):
         return all_videos_or_images_features,all_faster_video_features
 
     def add_token_per_grid(self, image_feature):
+        # 为视频网格特征插入分隔 token，并整理成语言模型可拼接的序列。
         resize_h = int(math.sqrt(image_feature.shape[1]))
         num_frames = image_feature.shape[0]
         feature_dim = image_feature.shape[-1]
@@ -243,12 +255,14 @@ class LlavaMetaForCausalLM(ABC):
         return image_feature
 
     def add_token_per_frame(self, image_feature):
+        # 为每一帧视觉特征插入分隔 token。
         image_feature = image_feature.permute(2, 0, 1).contiguous()
         image_feature =  torch.cat((image_feature, self.model.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.device)), dim=-1)
         image_feature = image_feature.permute(1, 2, 0).contiguous()
         return image_feature
 
     def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, modalities=["image"], image_sizes=None):
+        # 把文本 token 与视觉特征拼接成最终送入语言模型的输入与标签。
         vision_tower = self.get_vision_tower()
         # rank_print(modalities)
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
@@ -555,6 +569,7 @@ class LlavaMetaForCausalLM(ABC):
         return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):
+        # 给 tokenizer 增加图像相关特殊 token，并按需要初始化对应 embedding。
         if model_args.mm_use_im_patch_token:
             tokenizer.add_tokens([DEFAULT_IMAGE_PATCH_TOKEN], special_tokens=True)
             self.resize_token_embeddings(len(tokenizer))

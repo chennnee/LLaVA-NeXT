@@ -55,123 +55,44 @@ local_rank = None
 IS_TOKENIZER_GREATER_THAN_0_14 = version.parse(tokenizers.__version__) >= version.parse("0.14")
 
 
+# 把下面这个类声明成 dataclass，自动生成初始化方法，方便承载配置。
 @dataclass
+# 定义类 `ModelArguments`，把同一类配置或逻辑组织到一起。
 class ModelArguments:
-    # 这一组参数控制“模型本身怎么搭”。
-    # 对小白来说，可以先把它理解成：
-    # 1. 底座语言模型是谁
-    # 2. 视觉编码器是谁
-    # 3. 哪些模块要训练，哪些模块先冻结
-
-    # 底座语言模型路径。
-    # 例如可以填 Qwen/Qwen2-7B-Instruct，也可以填本地 checkpoint。
-    # 训练时会先加载这个语言模型，再决定要不要接视觉模块。
+    # 这一组参数控制底座模型、视觉塔以及多模态连接层的结构。
     model_name_or_path: Optional[str] = field(default="facebook/opt-125m")
-
-    # 可选：手动指定模型类名。
-    # 正常情况下代码会根据模型路径自动判断是 Qwen、Llama、Mistral 还是 Mixtral，
-    # 所以大多数时候你不用自己填它。
     model_class_name: Optional[str] = field(default=None, metadata={"help": "Used to init model class, format is XXXXForCausalLM. e.g. currently XXXX is chosen from LlavaLlama, LlavaMixtral, LlavaMistral, Llama"})
 
-    # 最重要的字段之一：决定“哪些模块真正参与训练”。
-    # 比如：
-    # - "mm_mlp_adapter"：只训练图像接入层，最省资源
-    # - "mm_vision_tower,mm_mlp_adapter,mm_language_model"：视觉塔、接入层、语言模型都训练，最贵
-    # 一旦设置了它，后面一些单独的 freeze/unfreeze 开关会被它覆盖。
     mm_tunable_parts: Optional[str] = field(
         default=None, metadata={"help": 'Could be "mm_mlp_adapter", "mm_vision_resampler", "mm_vision_tower,mm_mlp_adapter,mm_language_model", "mm_vision_tower,mm_mlp_adapter,mm_language_model", "mm_mlp_adapter,mm_language_model"'}
     )
     # deciding which part of the multimodal model to tune, will overwrite other previous settings
 
-    # 选择 prompt / 对话模板版本。
-    # 这个值会影响训练时对话是怎么拼接的。
     version: Optional[str] = field(default="v0")
-
-    # 是否冻结语言模型主干。
-    # True：大语言模型本体不训练，只训练上面的多模态模块
-    # False：语言模型本体也参与训练
     freeze_backbone: bool = field(default=False)
-
-    # 是否训练 mm projector。
-    # projector 的作用：把视觉特征映射到语言模型的隐藏维度。
-    # 这是多模态模型里最基础的“连接层”。
     tune_mm_mlp_adapter: bool = field(default=False)
-
-    # 是否训练 vision resampler。
-    # resampler 的作用：在视觉特征送进语言模型前，先做压缩、重排或池化。
     tune_mm_vision_resampler: bool = field(default=False)
-
-    # 视觉编码器路径。
-    # 这个字段非常关键。
-    # 如果它为空，模型更像是纯文本模型；
-    # 如果它不为空，代码就会按“多模态模型”路径去构建。
     vision_tower: Optional[str] = field(default=None)
-
-    # 视觉塔预训练权重来源。
-    # 一般不需要单独改，除非你要自己替换视觉编码器初始化方式。
     vision_tower_pretrained: Optional[str] = field(default=None)  # default to the last layer
 
-    # 是否解冻视觉塔本体。
-    # True：视觉编码器也一起训练，效果潜力更高，但更吃显存和算力
-    # False：视觉塔冻结，只把它当特征提取器
     unfreeze_mm_vision_tower: bool = field(default=False)
-
-    # 是否解冻语言模型本体。
-    # 它会和 freeze_backbone / mm_tunable_parts 一起决定最终哪些参数可训练。
     unfreeze_language_model: bool = field(default=False)
-
-    # 从视觉塔的哪一层取特征。
-    # -1 表示最后一层，-2 表示倒数第二层。
-    # 你可以先理解成：这是“从视觉模型哪个层拿图像特征”。
     mm_vision_select_layer: Optional[int] = field(default=-1)  # default to the last layer
-
-    # 如果你已经有预训练好的 projector 权重，可以从这里加载继续训练。
     pretrain_mm_mlp_adapter: Optional[str] = field(default=None)
-
-    # projector 的结构类型。
-    # linear：最简单
-    # mlp2x_gelu：更强一些，但参数也更多
     mm_projector_type: Optional[str] = field(default="linear")
-
-    # 是否把图片 token 包成 <im_start> <image> <im_end> 的形式。
-    # 主要和模型模板兼容性有关。
     mm_use_im_start_end: bool = field(default=False)
-
-    # 是否使用图片 patch token。
-    # 这是兼容项，第一次阅读可以先不深究。
     mm_use_im_patch_token: bool = field(default=True)
-
-    # 图像 patch 特征怎么合并。
-    # flat：直接拉平成一串 token
-    # spatial_*：尽量保留二维空间结构
     mm_patch_merge_type: Optional[str] = field(default="flat")
-
-    # 从视觉塔输出里选哪一类特征。
-    # patch 表示使用图像块级别的特征。
     mm_vision_select_feature: Optional[str] = field(default="patch")
-
-    # 视觉 resampler 类型。
-    # 它决定视觉 token 在送入语言模型前，如何被压缩和整理。
     mm_resampler_type: Optional[str] = field(default=None)
-
-    # 下面这一大组参数，都是在控制“视觉 token 怎么被筛选、压缩、池化”。
-    # 小白第一次读代码时，可以先把它们看成高级调参项。
     mm_mask_drop_mode: str = field(default="fixed")
     mm_mask_drop_skip_percentage: float = field(default=0.0)
     mm_mask_drop_ratio: float = field(default=0.25)
     mm_mask_drop_ratio_upper: Optional[float] = field(default=None)
     mm_mask_drop_ratio_lower: Optional[float] = field(default=None)
-
-    # 空间池化步长。
-    # 步长越大，视觉 token 压缩得越厉害，计算更省，但细节可能损失更多。
     mm_spatial_pool_stride: Optional[int] = field(default=None)
-
-    # 空间池化方式，比如 bilinear / average / max。
     mm_spatial_pool_mode: str = field(default="bilinear")
     mm_spatial_pool_out_channels: Optional[int] = field(default=None)
-
-    # perceiver / qformer 相关超参数。
-    # 这两个模块都属于“视觉特征压缩器”，第一次阅读时知道它们是高级结构参数就够了。
     mm_perceiver_depth: Optional[int] = field(default=3)
     mm_perceiver_latents: Optional[int] = field(default=32)
     mm_perceiver_ff_mult: Optional[float] = field(default=4)
@@ -180,233 +101,80 @@ class ModelArguments:
     mm_qformer_latents: Optional[int] = field(default=32)
     mm_qformer_pretrained: Optional[str] = field(default=None)
 
-    # 这两个参数和长上下文扩展有关。
-    # 当你想把上下文长度从原始长度扩到 8k/16k/32k 时，经常会用到 rope scaling。
     rope_scaling_factor: Optional[float] = field(default=None)
     rope_scaling_type: Optional[str] = field(default=None)
 
-    # 是否启用多尺度视觉编码。
-    # True 表示同一张图会按多个尺度提特征，效果更强，但更贵。
     s2: Optional[bool] = field(default=False)
     s2_scales: Optional[str] = field(default="336,672,1008")
 
-    # 长序列位置优化相关参数。
-    # 第一次看代码时，先知道它们和长上下文训练有关就够了。
     use_pos_skipping: Optional[bool] = field(default=False)
     pos_skipping_range: Optional[int] = field(default=4096)
 
 
-    # 图像/视频 token 序列里，“换行 token”插在哪里。
-    # 主要影响多图和视频输入时，视觉 token 的组织结构。
     mm_newline_position: Optional[str] = field(default="grid")
-
-    # 是否延迟加载视觉塔。
-    # 这样可以降低模型初始化时的显存/内存压力。
     delay_load: Optional[bool] = field(default=True)
-
-    # 是否启用更快的视频特征路径。
-    # 这是视频训练里的高级优化项。
     add_faster_video: Optional[bool] = field(default=False)
-
-    # faster video 分支的步长参数。
     faster_token_stride: Optional[int] = field(default=10)
 
 
 
+# 把下面这个类声明成 dataclass，自动生成初始化方法，方便承载配置。
 @dataclass
+# 定义类 `DataArguments`，把同一类配置或逻辑组织到一起。
 class DataArguments:
-    # 这一组参数控制“训练数据怎么读进来”。
-    # 你可以把它理解成：
-    # 1. 样本文件放在哪里
-    # 2. 图片从哪里读
-    # 3. 视频从哪里读
-    # 4. 图片和视频读进来以后怎么预处理
-
-    # 训练数据入口。
-    # 可以是一个 json 文件，也可以是 jsonl，或者是一个 yaml 配置文件。
-    # 如果是 yaml，就表示你要把多个数据源混在一起训练。
+    # 这一组参数控制训练数据的位置、图像/视频读取方式以及预处理策略。
     data_path: str = field(default=None, metadata={"help": "Path to the training data, in llava's instruction.json format. Supporting multiple json files via /path/to/{a,b,c}.json"})
-
-    # 是否启用“懒预处理”。
-    # True：初始化数据集时只记录样本，不提前处理图像/视频，真正取样本时再处理
-    # False：更早地做一些预处理
-    # 懒预处理更省初始化时间和内存，但训练时每次取样本会更忙。
     lazy_preprocess: bool = False
-
-    # 当前任务是否是多模态任务。
-    # 如果是 True，后续代码会去处理 `<image>` token、图像张量、视频帧等内容。
-    # 如果是 False，更多会按纯文本路径处理。
     is_multimodal: bool = False
-
-    # 是否把一部分纯文本样本提前混进训练。
-    # 它的目的通常是：在多模态训练里尽量保留模型的语言能力。
     early_mix_text: bool = False
-
-    # 图片根目录。
-    # 数据集里的 `image` 字段很多时候只保存相对路径，
-    # 真正读取文件时要把它和 image_folder 拼起来。
     image_folder: Optional[str] = field(default=None)
-
-    # 图片预处理策略。
-    # 常见值：
-    # - square：按方形输入处理
-    # - pad：先补边到方形
-    # - highres / anyres / crop_split：更复杂的高分辨率切块策略
-    # 这个字段会直接影响一张图最终会被变成多少视觉 token。
     image_aspect_ratio: str = "square"
-
-    # 图片网格配置。
-    # 它主要配合 anyres / highres 这类策略使用，
-    # 决定图片可以被切成哪些分辨率或网格组合。
     image_grid_pinpoints: Optional[str] = field(default=None)
-
-    # highres / crop_split 策略下的裁剪分辨率。
     image_crop_resolution: Optional[int] = field(default=None)
-
-    # highres / crop_split 策略下，每个小块的切分分辨率。
     image_split_resolution: Optional[int] = field(default=None)
 
-    # 视频根目录。
-    # 和 image_folder 一样，视频样本一般也只保存相对路径，需要和这里拼完整路径。
     video_folder: Optional[str] = field(default=None)
-
-    # 视频抽帧时的目标 fps。
-    # 值越大，抽出来的帧越密，信息更多，但显存和算力开销也更大。
     video_fps: Optional[int] = field(default=1)
-
-    # 每个视频最多保留多少帧。
-    # 这是视频训练里最重要的资源控制参数之一。
-    # 例如 0 表示不额外限制，16/32/64 则表示强制最多保留这么多帧。
     frames_upbound: Optional[int] = field(default=0)
-
-    # 是否把“视频时长 + 每一帧对应的时间点”写进 prompt。
-    # 打开后，模型会更明确地知道抽出来的帧来自视频哪个时间位置。
     add_time_instruction: Optional[bool] = field(default=False)
-
-    # 是否强制均匀采样视频帧。
-    # 有些视频即使原始帧数很多，也会被强行重新均匀抽成固定数量的帧。
     force_sample: Optional[bool] = field(default=False)
 
 
+# 把下面这个类声明成 dataclass，自动生成初始化方法，方便承载配置。
 @dataclass
+# 定义类 `TrainingArguments`，把同一类配置或逻辑组织到一起。
 class TrainingArguments(transformers.TrainingArguments):
-    # 这一组参数控制“训练过程本身怎么跑”。
-    # 它继承自 Hugging Face 的 TrainingArguments，
-    # 所以默认已经包含学习率、batch size、保存间隔、日志间隔等常见训练参数。
-    # 这里额外加的是：量化、LoRA、多模态模块学习率、分组采样等配置。
-
-    # 下载模型或 tokenizer 时，本地缓存目录放在哪里。
+    # 这一组参数继承自 HF Trainer，并额外补充多模态训练用到的选项。
     cache_dir: Optional[str] = field(default=None)
-
-    # 使用哪种优化器。
-    # 默认是 PyTorch 自带的 AdamW。
     optim: str = field(default="adamw_torch")
-
-    # 是否让 Trainer 自动删除“看起来没用”的数据列。
-    # 多模态任务里常常需要保留 images / image_sizes / modalities 这些字段，
-    # 所以这里默认 False，避免被误删。
     remove_unused_columns: bool = field(default=False)
-
-    # 是否冻结 mm projector。
-    # 常见场景是：projector 已经训好了，这次不想再更新它。
     freeze_mm_mlp_adapter: bool = field(default=False)
-
-    # 是否冻结 vision resampler。
     freeze_mm_vision_resampler: bool = field(default=False)
-
-    # MPT 模型专用的注意力实现方式。
-    # 这是特定模型的兼容项。
     mpt_attn_impl: Optional[str] = field(default="triton")
-
-    # 模型允许的最大序列长度。
-    # 文本 token、图像 token、视频帧 token 最后都会一起占这个长度预算。
-    # 值越大，能处理的上下文越长，但显存开销也更大。
     model_max_length: int = field(
         default=4096,
         metadata={"help": "Maximum sequence length. Sequences will be right padded (and possibly truncated)."},
     )
-
-    # 4bit 量化时，是否开启 double quant。
-    # 这是 bitsandbytes 里的显存优化技巧。
     double_quant: bool = field(default=True, metadata={"help": "Compress the quantization statistics through double quantization."})
-
-    # 量化类型。
-    # 一般常见的是 nf4。
     quant_type: str = field(default="nf4", metadata={"help": "Quantization data type to use. Should be one of `fp4` or `nf4`."})
-
-    # 模型权重按多少 bit 加载。
-    # 16 = 正常精度训练
-    # 8 / 4 = 量化训练，更省显存
     bits: int = field(default=16, metadata={"help": "How many bits to use."})
-
-    # 是否启用 LoRA。
-    # True 时，不是全量训练整个模型，而是在很多线性层上挂低秩适配器来训练。
-    # 这样显存更省，训练成本更低。
     lora_enable: bool = False
-
-    # LoRA 的秩。
-    # 越大表示 LoRA 的表达能力越强，但参数量和显存也会增加。
     lora_r: int = 64
-
-    # LoRA 的缩放系数。
     lora_alpha: int = 16
-
-    # LoRA dropout。
     lora_dropout: float = 0.05
-
-    # LoRA 权重路径。
-    # 某些场景下可以从已有 LoRA 权重继续训练或合并。
     lora_weight_path: str = ""
-
-    # LoRA 是否训练 bias。
-    # 常见值有 none / all / lora_only。
     lora_bias: str = "none"
-
-    # 给 mm projector 单独设置学习率。
-    # 多模态训练里，视觉接入层不一定适合和语言模型主干共用同一个学习率。
     mm_projector_lr: Optional[float] = None
-
-    # 给视觉塔单独设置学习率。
-    # 视觉塔通常比 projector 更敏感，很多实验会给它更小的学习率。
     mm_vision_tower_lr: Optional[float] = None
-
-    # 是否按“变长样本长度”分组采样。
-    # 这样做的好处是：同一个 batch 里的样本长度更接近，padding 浪费更少。
     group_by_varlen: bool = field(default=False)
-
-    # 是否按“模态长度”分组采样。
-    # 多模态样本和纯文本样本混在一起时，这个选项有助于减少 batch 内部差异。
     group_by_modality_length: bool = field(default=False)
-
-    # 自动版本的按模态长度分组。
     group_by_modality_length_auto: bool = field(default=False)
-
-    # 是否自动尝试缩小 batch size 直到能跑通。
-    # 有时显存不确定时会有帮助。
     auto_find_batch_size: bool = field(default=False)
-
-    # 是否启用 gradient checkpointing。
-    # 这是典型的“用更慢的计算换更少显存”的手段。
     gradient_checkpointing: bool = field(default=True)
-
-    # 是否打印更详细的配置日志。
     verbose_logging: bool = field(default=False)
-
-    # 注意力实现方式。
-    # 常见值：
-    # - flash_attention_2：更快，但环境要求更高
-    # - sdpa：更稳一些，依赖 PyTorch 自带实现
     attn_implementation: str = field(default="flash_attention_2", metadata={"help": "Use transformers attention implementation."})
-
-    # Trainer 的工作模式。
-    # regular = 正常训练
-    # zo = 零阶优化（MeZO）实验模式
     trainer_mode: str = field(default="regular", metadata={"help": "Mode of training (`regular`, `zo`)."})
-
-    # MeZO 的扰动步长参数。
     zo_eps: float = field(default=1e-3, metadata={"help": "MeZO hyperparameter epsilon."})
-
-    # MeZO 每次采样多少个方向来估计梯度。
     zo_num_directions: int = field(default=1, metadata={"help": "Number of directions for MeZO."})
 
 
@@ -428,6 +196,7 @@ class TrainingArguments(transformers.TrainingArguments):
 #     output_path: Optional[str] = field(default="./logs/")
 
 
+# 定义函数 `maybe_zero_3`，把一段可复用逻辑封装起来。
 def maybe_zero_3(param, ignore_status=False, name=None):
     # ZeRO-3 会把参数切分到不同卡上，这里负责在保存时临时聚合出完整参数。
     from deepspeed import zero
@@ -437,20 +206,25 @@ def maybe_zero_3(param, ignore_status=False, name=None):
         if param.ds_status == ZeroParamStatus.NOT_AVAILABLE:
             if not ignore_status:
                 logging.warning(f"{name}: param.ds_status != ZeroParamStatus.NOT_AVAILABLE: {param.ds_status}")
+        # 使用上下文管理器安全地打开资源，结束后会自动清理。
         with zero.GatheredParameters([param]):
             param = param.data.detach().cpu().clone()
+    # 当前面的条件都不成立时，执行这个兜底分支。
     else:
         param = param.detach().cpu().clone()
     return param
 
 
 # Borrowed from peft.utils.get_peft_model_state_dict
+# 定义函数 `get_peft_state_maybe_zero_3`，把一段可复用逻辑封装起来。
 def get_peft_state_maybe_zero_3(named_params, bias):
     # 提取 LoRA 权重，并在 ZeRO-3 场景下把切分后的参数先 gather 再保存。
     if bias == "none":
         to_return = {k: t for k, t in named_params if "lora_" in k}
+    # 如果前面的条件不成立，再检查 `bias == "all"` 这个分支。
     elif bias == "all":
         to_return = {k: t for k, t in named_params if "lora_" in k or "bias" in k}
+    # 如果前面的条件不成立，再检查 `bias == "lora_only"` 这个分支。
     elif bias == "lora_only":
         to_return = {}
         maybe_lora_bias = {}
@@ -458,19 +232,24 @@ def get_peft_state_maybe_zero_3(named_params, bias):
         for k, t in named_params:
             if "lora_" in k:
                 to_return[k] = t
+                # 给 `bias_name` 赋值：按分隔符把字符串拆成若干段，便于后续解析。
                 bias_name = k.split("lora_")[0] + "bias"
                 lora_bias_names.add(bias_name)
+            # 如果前面的条件不成立，再检查 `"bias" in k` 这个分支。
             elif "bias" in k:
                 maybe_lora_bias[k] = t
         for k, t in maybe_lora_bias:
             if bias_name in lora_bias_names:
                 to_return[bias_name] = t
+    # 当前面的条件都不成立时，执行这个兜底分支。
     else:
+        # 主动抛出异常，说明当前输入或状态不符合预期。
         raise NotImplementedError
     to_return = {k: maybe_zero_3(v, ignore_status=True) for k, v in to_return.items()}
     return to_return
 
 
+# 定义函数 `get_peft_state_non_lora_maybe_zero_3`，把一段可复用逻辑封装起来。
 def get_peft_state_non_lora_maybe_zero_3(named_params, require_grad_only=True):
     # 提取除 LoRA 外的可训练参数，通常与 LoRA 权重一起落盘。
     to_return = {k: t for k, t in named_params if "lora_" not in k}
@@ -480,6 +259,7 @@ def get_peft_state_non_lora_maybe_zero_3(named_params, require_grad_only=True):
     return to_return
 
 
+# 定义函数 `get_mm_adapter_state_maybe_zero_3`，把一段可复用逻辑封装起来。
 def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
     # 只筛出 projector / resampler 这类多模态适配器权重。
     to_return = {k: t for k, t in named_params if any(key_match in k for key_match in keys_to_match)}
@@ -487,6 +267,7 @@ def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
     return to_return
 
 
+# 定义函数 `find_all_linear_names`，把一段可复用逻辑封装起来。
 def find_all_linear_names(model):
     # 自动扫描语言模型中的线性层，作为 LoRA 的挂载目标。
     cls = torch.nn.Linear
@@ -496,6 +277,7 @@ def find_all_linear_names(model):
         if any(mm_keyword in name for mm_keyword in multimodal_keywords):
             continue
         if isinstance(module, cls):
+            # 给 `names` 赋值：按分隔符把字符串拆成若干段，便于后续解析。
             names = name.split(".")
             lora_module_names.add(names[0] if len(names) == 1 else names[-1])
 
@@ -504,19 +286,24 @@ def find_all_linear_names(model):
     return list(lora_module_names)
 
 
+# 定义函数 `safe_save_model_for_hf_trainer`，把一段可复用逻辑封装起来。
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
+    # 文档字符串：说明下面这个函数或代码块的用途。
     """Collects the state dict and dump to disk."""
     # 如果当前只训练多模态适配器，则只保存 projector / resampler，而不是整模型。
     if hasattr(trainer.args, "tune_mm_mlp_adapter") and trainer.args.tune_mm_mlp_adapter:
         check_only_save_mm_adapter_tunnable = True
     # only has mm_mlp_adapter and mm_vision_resampler in the tuneable parts
+    # 如果前面的条件不成立，再检查 `hasattr(trainer.args, "mm_tunable_parts") and (len(trainer.args.mm_tunable_parts.split(",")) == 1 and ("mm_mlp_adapter" in trainer.args.mm_tunable_parts or "mm_vision_resampler" in trainer.args.mm_tunable_parts))` 这个分支。
     elif hasattr(trainer.args, "mm_tunable_parts") and (len(trainer.args.mm_tunable_parts.split(",")) == 1 and ("mm_mlp_adapter" in trainer.args.mm_tunable_parts or "mm_vision_resampler" in trainer.args.mm_tunable_parts)):
         check_only_save_mm_adapter_tunnable = True
+    # 当前面的条件都不成立时，执行这个兜底分支。
     else:
         check_only_save_mm_adapter_tunnable = False
 
     trainer.accelerator.wait_for_everyone()
     torch.cuda.synchronize()
+    # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
     rank0_print(f"Only save projectors: {check_only_save_mm_adapter_tunnable}")
     if check_only_save_mm_adapter_tunnable:
         # 只保存 Adapter，方便继续在基础语言模型上恢复训练或推理。
@@ -527,22 +314,30 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
         weight_to_save = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
         trainer.model.config.save_pretrained(output_dir)
 
+        # 给 `current_folder` 赋值：按分隔符把字符串拆成若干段，便于后续解析。
         current_folder = output_dir.split("/")[-1]
         parent_folder = os.path.dirname(output_dir)
         if trainer.args.local_rank == 0 or trainer.args.local_rank == -1:
             if current_folder.startswith("checkpoint-"):
+                # 给 `mm_projector_folder` 赋值：拼接平台无关的文件路径。
                 mm_projector_folder = os.path.join(parent_folder, "mm_projector")
                 os.makedirs(mm_projector_folder, exist_ok=True)
+                # 把当前张量或权重保存到磁盘文件。
                 torch.save(weight_to_save, os.path.join(mm_projector_folder, f"{current_folder}.bin"))
+            # 当前面的条件都不成立时，执行这个兜底分支。
             else:
+                # 把当前张量或权重保存到磁盘文件。
                 torch.save(weight_to_save, os.path.join(output_dir, f"mm_projector.bin"))
+        # 直接结束当前函数。
         return
 
     if trainer.deepspeed:
         # DeepSpeed 自己处理了分布式保存逻辑，这里直接调用其保存接口。
         trainer.save_model(output_dir)
+        # 直接结束当前函数。
         return
 
+    # 给 `state_dict` 赋值：构造一个字典，把相关结果打包返回。
     state_dict = trainer.model.state_dict()
     if trainer.args.should_save:
         cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
@@ -550,11 +345,13 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
         trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
 
 
+# 定义函数 `smart_tokenizer_and_embedding_resize`，把一段可复用逻辑封装起来。
 def smart_tokenizer_and_embedding_resize(
     special_tokens_dict: Dict,
     tokenizer: transformers.PreTrainedTokenizer,
     model: transformers.PreTrainedModel,
 ):
+    # 文档字符串：说明下面这个函数或代码块的用途。
     """Resize tokenizer and embedding.
 
     Note: This is the unoptimized version that may make your embedding size not be divisible by 64.
@@ -576,7 +373,9 @@ def smart_tokenizer_and_embedding_resize(
         output_embeddings[-num_new_tokens:] = output_embeddings_avg
 
 
+# 定义函数 `_tokenize_fn`，把一段可复用逻辑封装起来。
 def _tokenize_fn(strings: Sequence[str], tokenizer: transformers.PreTrainedTokenizer) -> Dict:
+    # 文档字符串：说明下面这个函数或代码块的用途。
     """Tokenize a list of strings."""
     # 对若干段文本分别做 tokenize，并保留每段的有效 token 长度。
     tokenized_list = [
@@ -599,19 +398,24 @@ def _tokenize_fn(strings: Sequence[str], tokenizer: transformers.PreTrainedToken
     )
 
 
+# 定义函数 `_mask_targets`，把一段可复用逻辑封装起来。
 def _mask_targets(target, tokenized_lens, speakers):
     # 监督微调时只学习 assistant 的输出，因此 human 段落要整体 mask 掉。
     # cur_idx = 0
     cur_idx = tokenized_lens[0]
     tokenized_lens = tokenized_lens[1:]
+    # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
     target[:cur_idx] = IGNORE_INDEX
     for tokenized_len, speaker in zip(tokenized_lens, speakers):
         if speaker == "human":
+            # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
             target[cur_idx + 2 : cur_idx + tokenized_len] = IGNORE_INDEX
         cur_idx += tokenized_len
 
 
+# 定义函数 `_add_speaker_and_signal`，把一段可复用逻辑封装起来。
 def _add_speaker_and_signal(header, source, get_conversation=True):
+    # 文档字符串：说明下面这个函数或代码块的用途。
     """Add speaker and start/end signal on each round."""
     # 把原始 `human/gpt` 对话样本格式化成带角色标签的纯文本 prompt。
     BEGIN_SIGNAL = "### "
@@ -621,17 +425,22 @@ def _add_speaker_and_signal(header, source, get_conversation=True):
         from_str = sentence["from"]
         if from_str.lower() == "human":
             from_str = conversation_lib.default_conversation.roles[0]
+        # 如果前面的条件不成立，再检查 `from_str.lower() == "gpt"` 这个分支。
         elif from_str.lower() == "gpt":
             from_str = conversation_lib.default_conversation.roles[1]
+        # 当前面的条件都不成立时，执行这个兜底分支。
         else:
             from_str = "unknown"
         sentence["value"] = BEGIN_SIGNAL + from_str + ": " + sentence["value"] + END_SIGNAL
         if get_conversation:
+            # 把当前片段继续拼接到完整对话字符串后面。
             conversation += sentence["value"]
+    # 把当前片段继续拼接到完整对话字符串后面。
     conversation += BEGIN_SIGNAL
     return conversation
 
 
+# 定义函数 `preprocess_multimodal`，把一段可复用逻辑封装起来。
 def preprocess_multimodal(sources: Sequence[str], data_args: DataArguments) -> Dict:
     # 统一整理 `<image>` 占位符的位置和包裹形式，保证后续 tokenizer 行为一致。
     is_multimodal = data_args.is_multimodal
@@ -643,6 +452,7 @@ def preprocess_multimodal(sources: Sequence[str], data_args: DataArguments) -> D
             # TODO maybe this should be changed for interleaved data?
             # if DEFAULT_IMAGE_TOKEN in sentence["value"] and not sentence["value"].startswith(DEFAULT_IMAGE_TOKEN):
             # only check for num_im=1
+            # 给 `num_im` 赋值：用正则解析字符串里的结构化信息。
             num_im = len(re.findall(DEFAULT_IMAGE_TOKEN, sentence["value"]))
             if num_im == 1 and DEFAULT_IMAGE_TOKEN in sentence["value"] and not sentence["value"].startswith(DEFAULT_IMAGE_TOKEN):
                 sentence["value"] = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, "").strip()
@@ -661,8 +471,10 @@ def preprocess_multimodal(sources: Sequence[str], data_args: DataArguments) -> D
     return sources
 
 
+# 定义函数 `preprocess_llama_2`，把一段可复用逻辑封装起来。
 def preprocess_llama_2(sources, tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False) -> Dict:
     # 按 LLaMA-2 对话模板拼接对话，并构造训练 labels。
+    # 给 `conv` 赋值：复制当前对象，后续修改副本时不污染原对象。
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
 
@@ -676,7 +488,9 @@ def preprocess_llama_2(sources, tokenizer: transformers.PreTrainedTokenizer, has
         conv.messages = []
         for j, sentence in enumerate(source):
             role = roles[sentence["from"]]
+            # 用断言强制检查一个前提条件，条件不满足就立即报错。
             assert role == conv.roles[j % 2], f"{i}"
+            # 往对话模板中追加一轮消息，逐步构造完整对话。
             conv.append_message(role, sentence["value"])
         conversations.append(conv.get_prompt())
 
@@ -684,6 +498,7 @@ def preprocess_llama_2(sources, tokenizer: transformers.PreTrainedTokenizer, has
 
     if has_image:
         input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+    # 当前面的条件都不成立时，执行这个兜底分支。
     else:
         input_ids = tokenizer(
             conversations,
@@ -695,6 +510,7 @@ def preprocess_llama_2(sources, tokenizer: transformers.PreTrainedTokenizer, has
 
     targets = input_ids.clone()
 
+    # 用断言强制检查一个前提条件，条件不满足就立即报错。
     assert conv.sep_style == conversation_lib.SeparatorStyle.LLAMA_2
 
     # 只保留 assistant 回复为可学习目标，其余位置统一设为 IGNORE_INDEX。
@@ -702,33 +518,45 @@ def preprocess_llama_2(sources, tokenizer: transformers.PreTrainedTokenizer, has
     for conversation, target in zip(conversations, targets):
         total_len = int(target.ne(tokenizer.pad_token_id).sum())
 
+        # 给 `rounds` 赋值：按分隔符把字符串拆成若干段，便于后续解析。
         rounds = conversation.split(conv.sep2)
         cur_len = 1
+        # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
         target[:cur_len] = IGNORE_INDEX
         for i, rou in enumerate(rounds):
             if rou == "":
                 break
 
+            # 给 `parts` 赋值：按分隔符把字符串拆成若干段，便于后续解析。
             parts = rou.split(sep)
             if len(parts) != 2:
                 break
             parts[0] += sep
 
             if has_image:
+                # 给 `round_len` 赋值：把带 `<image>` 占位符的文本编码成 token，并把图片位置映射成专用图像 token。
                 round_len = len(tokenizer_image_token(rou, tokenizer))
+                # 给 `instruction_len` 赋值：把带 `<image>` 占位符的文本编码成 token，并把图片位置映射成专用图像 token。
                 instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
+            # 当前面的条件都不成立时，执行这个兜底分支。
             else:
+                # 给 `round_len` 赋值：把文本编码成 token id 序列，供模型训练或推理使用。
                 round_len = len(tokenizer(rou).input_ids)
+                # 给 `instruction_len` 赋值：把文本编码成 token id 序列，供模型训练或推理使用。
                 instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
+            # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
             target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
 
             cur_len += round_len
+        # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
         target[cur_len:] = IGNORE_INDEX
 
         if cur_len < tokenizer.model_max_length:
             if cur_len != total_len:
+                # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
                 target[:] = IGNORE_INDEX
+                # 把关键信息打印到终端，便于调试或观察运行状态。
                 print(f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}." f" (ignored)")
 
     return dict(
@@ -737,6 +565,7 @@ def preprocess_llama_2(sources, tokenizer: transformers.PreTrainedTokenizer, has
     )
 
 
+# 定义函数 `preprocess_gemma`，把一段可复用逻辑封装起来。
 def preprocess_gemma(sources: List[List[Dict[str, str]]], tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False) -> Dict:
     # Gemma 的模板和分隔符与其他模型不同，需要单独处理。
     conv: conversation_lib.Conversation = conversation_lib.default_conversation.copy()
@@ -752,13 +581,16 @@ def preprocess_gemma(sources: List[List[Dict[str, str]]], tokenizer: transformer
         conv.messages = []
         for j, sentence in enumerate(source):
             role: str = roles[sentence["from"]]
+            # 用断言强制检查一个前提条件，条件不满足就立即报错。
             assert role == conv.roles[j % 2], f"{i}"
+            # 往对话模板中追加一轮消息，逐步构造完整对话。
             conv.append_message(role, sentence["value"])
         conversations.append(conv.get_prompt())
 
     # 对完整 prompt 做 tokenize，图文样本使用图像感知版 tokenizer。
     if has_image:
         input_ids: torch.Tensor = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+    # 当前面的条件都不成立时，执行这个兜底分支。
     else:
         input_ids: torch.Tensor = tokenizer(
             conversations,
@@ -769,6 +601,7 @@ def preprocess_gemma(sources: List[List[Dict[str, str]]], tokenizer: transformer
         ).input_ids
 
     targets: torch.Tensor = input_ids.clone()
+    # 用断言强制检查一个前提条件，条件不满足就立即报错。
     assert conv.sep_style == conversation_lib.SeparatorStyle.GEMMA
 
     # 只让 assistant 的部分参与 loss 计算。
@@ -782,11 +615,13 @@ def preprocess_gemma(sources: List[List[Dict[str, str]]], tokenizer: transformer
             re_rounds.append(conv.sep.join(rounds[conv_idx : conv_idx + 2]))
 
         cur_len = 1  # Ignore <bos>
+        # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
         target[:cur_len] = IGNORE_INDEX
         for i, rou in enumerate(re_rounds):
             if rou == "":
                 break
 
+            # 给 `parts` 赋值：按分隔符把字符串拆成若干段，便于后续解析。
             parts = rou.split(sep)
             if len(parts) != 2:
                 break
@@ -794,21 +629,30 @@ def preprocess_gemma(sources: List[List[Dict[str, str]]], tokenizer: transformer
             # Now "".join(parts)==rou
 
             if has_image:
+                # 给 `round_len` 赋值：把带 `<image>` 占位符的文本编码成 token，并把图片位置映射成专用图像 token。
                 round_len = len(tokenizer_image_token(rou, tokenizer)) - 1  # Ignore <bos>
+                # 给 `instruction_len` 赋值：把带 `<image>` 占位符的文本编码成 token，并把图片位置映射成专用图像 token。
                 instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 1  # Ignore <bos>
+            # 当前面的条件都不成立时，执行这个兜底分支。
             else:
+                # 给 `round_len` 赋值：把文本编码成 token id 序列，供模型训练或推理使用。
                 round_len = len(tokenizer(rou).input_ids) - 1  # Ignore <bos>
+                # 给 `instruction_len` 赋值：把文本编码成 token id 序列，供模型训练或推理使用。
                 instruction_len = len(tokenizer(parts[0]).input_ids) - 1  # Ignore <bos>
 
             round_len += 2  # sep: <end_of_turn>\n takes 2 tokens
+            # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
             target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
             cur_len += round_len
 
+        # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
         target[cur_len:] = IGNORE_INDEX
 
         if cur_len < tokenizer.model_max_length:
             if cur_len != total_len:
+                # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
                 target[:] = IGNORE_INDEX
+                # 把关键信息打印到终端，便于调试或观察运行状态。
                 print(f"warning: tokenization mismatch: {cur_len} vs. {total_len}." f" (ignored)")
 
     return dict(
@@ -817,12 +661,14 @@ def preprocess_gemma(sources: List[List[Dict[str, str]]], tokenizer: transformer
     )
 
 
+# 定义函数 `preprocess_qwen`，把一段可复用逻辑封装起来。
 def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False, max_len=2048, system_message: str = "You are a helpful assistant.") -> Dict:
     # Qwen 依赖 chat template，因此这里直接复用 tokenizer.apply_chat_template。
     # roles = {"human": "<|im_start|>user", "gpt": "<|im_start|>assistant"}
     roles = {"human": "user", "gpt": "assistant"}
 
     # 拷贝一份 tokenizer，避免把 `<image>` 永久污染到外部 tokenizer 实例里。
+    # 深拷贝一份对象，避免后续修改影响原始输入。
     tokenizer = copy.deepcopy(tokenizer)
     # When there is actually an image, we add the image tokens as a special token
     if has_image:
@@ -832,6 +678,7 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
     im_start, im_end = tokenizer.additional_special_tokens_ids
     # unmask_tokens = ["<|im_start|>", "<|im_start|>", "\n"]
     unmask_tokens_idx =  [198, im_start, im_end]
+    # 给 `nl_tokens` 赋值：把文本编码成 token id 序列，供模型训练或推理使用。
     nl_tokens = tokenizer("\n").input_ids
 
     # 重置 chat template，避免系统消息被重复插入。
@@ -851,11 +698,14 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
         input_id, target = [], []
 
         # 先编码系统消息；系统消息只作为上下文，不参与 loss。
+        # 把当前这轮编码结果接到总输入序列后面。
         input_id += tokenizer.apply_chat_template([{"role" : "system", "content" : system_message}])
+        # 把当前这轮标签结果接到总标签序列后面。
         target += [IGNORE_INDEX] * len(input_id)
 
         for conv in source:
             # 兼容两种字段命名：role/content 与 from/value。
+            # 尝试执行下面这段可能出错的逻辑。
             try:
                 role = conv["role"]
                 content = conv["content"]
@@ -866,20 +716,27 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
             role =  roles.get(role, role)
 
             conv = [{"role" : role, "content" : content}]
+            # 给 `encode_id` 赋值：用 tokenizer 内置的 chat template 把对话格式化成模型实际看到的字符串/token。
             encode_id = tokenizer.apply_chat_template(conv)
+            # 把当前这轮编码结果接到总输入序列后面。
             input_id += encode_id
             # user/system 位置不计算 loss，assistant 位置保留原 token 作为监督目标。
             if role in ["user", "system"]:
+                # 把当前这轮标签结果接到总标签序列后面。
                 target += [IGNORE_INDEX] * len(encode_id)
+            # 当前面的条件都不成立时，执行这个兜底分支。
             else:
+                # 把当前这轮标签结果接到总标签序列后面。
                 target += encode_id
 
 
 
+        # 用断言强制检查一个前提条件，条件不满足就立即报错。
         assert len(input_id) == len(target), f"{len(input_id)} != {len(target)}"
         for idx, encode_id in enumerate(input_id):
             # 特殊控制 token 需要取消 mask，否则 chat template 结构会被模型遗忘。
             if encode_id in unmask_tokens_idx:
+                # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
                 target[idx] = encode_id
             # 把 tokenizer 私有的 `<image>` id 映射回项目统一的 IMAGE_TOKEN_INDEX。
             if encode_id == image_token_index:
@@ -895,6 +752,7 @@ def preprocess_qwen(sources, tokenizer: transformers.PreTrainedTokenizer, has_im
     )
 
 
+# 定义函数 `preprocess_llama3`，把一段可复用逻辑封装起来。
 def preprocess_llama3(
     sources,
     tokenizer: transformers.PreTrainedTokenizer,
@@ -907,6 +765,7 @@ def preprocess_llama3(
     roles = {"human": "user", "gpt": "assistant"}
 
     # 同样先复制 tokenizer，避免原始 tokenizer 被就地修改。
+    # 深拷贝一份对象，避免后续修改影响原始输入。
     tokenizer = copy.deepcopy(tokenizer)
     # When there is actually an image, we add the image tokens as a special token
     if has_image:
@@ -921,6 +780,7 @@ def preprocess_llama3(
     unmask_tokens_idx = [tokenizer.convert_tokens_to_ids(tok) for tok in unmask_tokens]
 
     # llama3 tokenizer 会自动补 bos，这里包一层是为了避免重复。
+    # 定义函数 `safe_tokenizer_llama3`，把一段可复用逻辑封装起来。
     def safe_tokenizer_llama3(text):
         input_ids = tokenizer(text).input_ids
         if input_ids[0] == bos_token_id:
@@ -937,11 +797,14 @@ def preprocess_llama3(
         input_id, target = [], []
 
         # 系统消息只提供上下文，不参与损失。
+        # 把当前这轮编码结果接到总输入序列后面。
         input_id += tokenizer.apply_chat_template([{"role" : "system", "content" : system_message}])
+        # 把当前这轮标签结果接到总标签序列后面。
         target += [IGNORE_INDEX] * len(input_id)
 
         for conv in source:
             # 兼容 llava 原始数据格式与 role/content 风格数据格式。
+            # 尝试执行下面这段可能出错的逻辑。
             try:
                 role = conv["role"]
                 content = conv["content"]
@@ -953,19 +816,26 @@ def preprocess_llama3(
 
             conv = [{"role" : role, "content" : content}]
             # apply_chat_template 返回的首位 bos 在多轮拼接时不需要重复保留。
+            # 给 `encode_id` 赋值：用 tokenizer 内置的 chat template 把对话格式化成模型实际看到的字符串/token。
             encode_id = tokenizer.apply_chat_template(conv)[1:]
+            # 把当前这轮编码结果接到总输入序列后面。
             input_id += encode_id
             if role in ["user", "system"]:
+                # 把当前这轮标签结果接到总标签序列后面。
                 target += [IGNORE_INDEX] * len(encode_id)
+            # 当前面的条件都不成立时，执行这个兜底分支。
             else:
+                # 把当前这轮标签结果接到总标签序列后面。
                 target += encode_id
 
 
 
+        # 用断言强制检查一个前提条件，条件不满足就立即报错。
         assert len(input_id) == len(target), f"{len(input_id)} != {len(target)}"
         for idx, encode_id in enumerate(input_id):
             # 保留 chat template 的结构 token，避免模板被完全 mask 掉。
             if encode_id in unmask_tokens_idx:
+                # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
                 target[idx] = encode_id
             if encode_id == image_token_index:
                 input_id[idx] = IMAGE_TOKEN_INDEX
@@ -980,8 +850,10 @@ def preprocess_llama3(
     )
 
 
+# 定义函数 `preprocess_v1`，把一段可复用逻辑封装起来。
 def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False) -> Dict:
     # 处理 Vicuna/LLaVA v1 风格模板。
+    # 给 `conv` 赋值：复制当前对象，后续修改副本时不污染原对象。
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
 
@@ -995,7 +867,9 @@ def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_imag
         conv.messages = []
         for j, sentence in enumerate(source):
             role = roles[sentence["from"]]
+            # 用断言强制检查一个前提条件，条件不满足就立即报错。
             assert role == conv.roles[j % 2], f"{i}"
+            # 往对话模板中追加一轮消息，逐步构造完整对话。
             conv.append_message(role, sentence["value"])
         conversations.append(conv.get_prompt())
 
@@ -1003,6 +877,7 @@ def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_imag
 
     if has_image:
         input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+    # 当前面的条件都不成立时，执行这个兜底分支。
     else:
         input_ids = tokenizer(
             conversations,
@@ -1014,6 +889,7 @@ def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_imag
 
     targets = input_ids.clone()
 
+    # 用断言强制检查一个前提条件，条件不满足就立即报错。
     assert conv.sep_style == conversation_lib.SeparatorStyle.TWO
 
     # human 段落全部 mask，assistant 段落参与损失。
@@ -1021,37 +897,49 @@ def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_imag
     for conversation, target in zip(conversations, targets):
         total_len = int(target.ne(tokenizer.pad_token_id).sum())
 
+        # 给 `rounds` 赋值：按分隔符把字符串拆成若干段，便于后续解析。
         rounds = conversation.split(conv.sep2)
         cur_len = 1
+        # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
         target[:cur_len] = IGNORE_INDEX
         for i, rou in enumerate(rounds):
             if rou == "":
                 break
 
+            # 给 `parts` 赋值：按分隔符把字符串拆成若干段，便于后续解析。
             parts = rou.split(sep)
             if len(parts) != 2:
                 break
             parts[0] += sep
 
             if has_image:
+                # 给 `round_len` 赋值：把带 `<image>` 占位符的文本编码成 token，并把图片位置映射成专用图像 token。
                 round_len = len(tokenizer_image_token(rou, tokenizer))
+                # 给 `instruction_len` 赋值：把带 `<image>` 占位符的文本编码成 token，并把图片位置映射成专用图像 token。
                 instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
+            # 当前面的条件都不成立时，执行这个兜底分支。
             else:
+                # 给 `round_len` 赋值：把文本编码成 token id 序列，供模型训练或推理使用。
                 round_len = len(tokenizer(rou).input_ids)
+                # 给 `instruction_len` 赋值：把文本编码成 token id 序列，供模型训练或推理使用。
                 instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
             if i != 0 and not tokenizer.legacy and IS_TOKENIZER_GREATER_THAN_0_14:
                 round_len -= 1
                 instruction_len -= 1
 
+            # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
             target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
 
             cur_len += round_len
+        # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
         target[cur_len:] = IGNORE_INDEX
 
         if cur_len < tokenizer.model_max_length:
             if cur_len != total_len:
+                # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
                 target[:] = IGNORE_INDEX
+                # 把关键信息打印到终端，便于调试或观察运行状态。
                 print(f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}." f" (ignored)")
 
     return dict(
@@ -1060,8 +948,10 @@ def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_imag
     )
 
 
+# 定义函数 `preprocess_mpt`，把一段可复用逻辑封装起来。
 def preprocess_mpt(sources, tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False) -> Dict:
     # MPT 使用自己的分隔风格，目标 mask 规则也要跟着调整。
+    # 给 `conv` 赋值：复制当前对象，后续修改副本时不污染原对象。
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
 
@@ -1075,7 +965,9 @@ def preprocess_mpt(sources, tokenizer: transformers.PreTrainedTokenizer, has_ima
         conv.messages = []
         for j, sentence in enumerate(source):
             role = roles[sentence["from"]]
+            # 用断言强制检查一个前提条件，条件不满足就立即报错。
             assert role == conv.roles[j % 2], f"{i}"
+            # 往对话模板中追加一轮消息，逐步构造完整对话。
             conv.append_message(role, sentence["value"])
         conversations.append(conv.get_prompt())
 
@@ -1083,6 +975,7 @@ def preprocess_mpt(sources, tokenizer: transformers.PreTrainedTokenizer, has_ima
 
     if has_image:
         input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations], dim=0)
+    # 当前面的条件都不成立时，执行这个兜底分支。
     else:
         input_ids = tokenizer(
             conversations,
@@ -1093,6 +986,7 @@ def preprocess_mpt(sources, tokenizer: transformers.PreTrainedTokenizer, has_ima
         ).input_ids
 
     targets = input_ids.clone()
+    # 用断言强制检查一个前提条件，条件不满足就立即报错。
     assert conv.sep_style == conversation_lib.SeparatorStyle.MPT
 
     # 仅监督 assistant 回复部分。
@@ -1100,40 +994,52 @@ def preprocess_mpt(sources, tokenizer: transformers.PreTrainedTokenizer, has_ima
     for conversation, target in zip(conversations, targets):
         total_len = int(target.ne(tokenizer.pad_token_id).sum())
 
+        # 给 `rounds` 赋值：按分隔符把字符串拆成若干段，便于后续解析。
         rounds = conversation.split(conv.sep)
         re_rounds = [conv.sep.join(rounds[:3])]  # system + user + gpt
         for conv_idx in range(3, len(rounds), 2):
             re_rounds.append(conv.sep.join(rounds[conv_idx : conv_idx + 2]))  # user + gpt
         cur_len = 1
+        # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
         target[:cur_len] = IGNORE_INDEX
         for i, rou in enumerate(re_rounds):
             if rou == "":
                 break
 
+            # 给 `parts` 赋值：按分隔符把字符串拆成若干段，便于后续解析。
             parts = rou.split(sep)
             if len(parts) != 2:
                 break
             parts[0] += sep
 
             if has_image:
+                # 给 `round_len` 赋值：把带 `<image>` 占位符的文本编码成 token，并把图片位置映射成专用图像 token。
                 round_len = len(tokenizer_image_token(rou, tokenizer))
+                # 给 `instruction_len` 赋值：把带 `<image>` 占位符的文本编码成 token，并把图片位置映射成专用图像 token。
                 instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 1
+            # 当前面的条件都不成立时，执行这个兜底分支。
             else:
+                # 给 `round_len` 赋值：把文本编码成 token id 序列，供模型训练或推理使用。
                 round_len = len(tokenizer(rou).input_ids)
+                # 给 `instruction_len` 赋值：把文本编码成 token id 序列，供模型训练或推理使用。
                 instruction_len = len(tokenizer(parts[0]).input_ids) - 1
 
             if i != 0 and getattr(tokenizer, "legacy", False) and IS_TOKENIZER_GREATER_THAN_0_14:
                 round_len += 1
                 instruction_len += 1
 
+            # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
             target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
 
             cur_len += round_len
+        # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
         target[cur_len:] = IGNORE_INDEX
 
         if cur_len < tokenizer.model_max_length:
             if cur_len != total_len:
+                # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
                 target[:] = IGNORE_INDEX
+                # 把关键信息打印到终端，便于调试或观察运行状态。
                 print(f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}." f"(#turns={len(re_rounds)} ignored)")
 
     return dict(
@@ -1142,6 +1048,7 @@ def preprocess_mpt(sources, tokenizer: transformers.PreTrainedTokenizer, has_ima
     )
 
 
+# 定义函数 `preprocess_plain`，把一段可复用逻辑封装起来。
 def preprocess_plain(
     sources: Sequence[str],
     tokenizer: transformers.PreTrainedTokenizer,
@@ -1150,7 +1057,9 @@ def preprocess_plain(
     # add end signal and concatenate together
     conversations = []
     for source in sources:
+        # 用断言强制检查一个前提条件，条件不满足就立即报错。
         assert len(source) == 2
+        # 用断言强制检查一个前提条件，条件不满足就立即报错。
         assert DEFAULT_IMAGE_TOKEN in source[0]["value"]
         source[0]["value"] = DEFAULT_IMAGE_TOKEN
         conversation = source[0]["value"] + source[1]["value"] + conversation_lib.default_conversation.sep
@@ -1159,12 +1068,15 @@ def preprocess_plain(
     input_ids = [tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations]
     targets = copy.deepcopy(input_ids)
     for target, source in zip(targets, sources):
+        # 给 `tokenized_len` 赋值：把带 `<image>` 占位符的文本编码成 token，并把图片位置映射成专用图像 token。
         tokenized_len = len(tokenizer_image_token(source[0]["value"], tokenizer))
+        # 直接修改标签张量中的某一段，决定这些位置是否参与损失计算。
         target[:tokenized_len] = IGNORE_INDEX
 
     return dict(input_ids=input_ids, labels=targets)
 
 
+# 定义函数 `preprocess`，把一段可复用逻辑封装起来。
 def preprocess(sources: Sequence[str], tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False) -> Dict:
     """
     Given a list of sources, each is a conversation list. This transform:
@@ -1196,11 +1108,13 @@ def preprocess(sources: Sequence[str], tokenizer: transformers.PreTrainedTokeniz
         conversations.append(conversation)
 
     # 再把拼接后的整段对话转成 token，并构造 labels。
+    # 定义函数 `get_tokenize_len`，把一段可复用逻辑封装起来。
     def get_tokenize_len(prompts):
         return [len(tokenizer_image_token(prompt, tokenizer)) for prompt in prompts]
 
     if has_image:
         input_ids = [tokenizer_image_token(prompt, tokenizer, return_tensors="pt") for prompt in conversations]
+    # 当前面的条件都不成立时，执行这个兜底分支。
     else:
         conversations_tokenized = _tokenize_fn(conversations, tokenizer)
         input_ids = conversations_tokenized["input_ids"]
@@ -1208,7 +1122,9 @@ def preprocess(sources: Sequence[str], tokenizer: transformers.PreTrainedTokeniz
     targets = copy.deepcopy(input_ids)
     for target, source in zip(targets, sources):
         if has_image:
+            # 给 `tokenized_lens` 赋值：计算当前对象的长度。
             tokenized_lens = get_tokenize_len([header] + [s["value"] for s in source])
+        # 当前面的条件都不成立时，执行这个兜底分支。
         else:
             tokenized_lens = _tokenize_fn([header] + [s["value"] for s in source], tokenizer)["input_ids_lens"]
         speakers = [sentence["from"] for sentence in source]
@@ -1217,7 +1133,9 @@ def preprocess(sources: Sequence[str], tokenizer: transformers.PreTrainedTokeniz
     return dict(input_ids=input_ids, labels=targets)
 
 
+# 定义类 `LazySupervisedDataset`，把同一类配置或逻辑组织到一起。
 class LazySupervisedDataset(Dataset):
+    # 定义函数 `__init__`，把一段可复用逻辑封装起来。
     def __init__(self, data_path: str, tokenizer: transformers.PreTrainedTokenizer, data_args: DataArguments):
         # 这里只建立样本清单，真正耗时的图片/视频预处理延迟到 __getitem__ 再做。
         super(LazySupervisedDataset, self).__init__()
@@ -1227,20 +1145,29 @@ class LazySupervisedDataset(Dataset):
         # 支持 `{a,b,c}.json` 这种简写，一次加载多个 JSON。
         if "{" in data_path and "}" in data_path:
             base_path, file_pattern = re.match(r"^(.*)\{(.*)\}\.json$", data_path).groups()
+            # 给 `file_names` 赋值：按分隔符把字符串拆成若干段，便于后续解析。
             file_names = file_pattern.split(",")
+            # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
             rank0_print(f"Loading {file_names} from {base_path}")
             data_args.dataset_paths = []
             for file_name in file_names:
                 data_args.dataset_paths.append(f"{base_path}{file_name}.json")
                 full_path = f"{base_path}{file_name}.json"
+                # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
                 rank0_print(f"Loading {full_path}")
+                # 使用上下文管理器安全地打开资源，结束后会自动清理。
                 with open(full_path, "r") as file:
+                    # 给 `cur_data_dict` 赋值：从 JSON 文件一次性读入结构化样本。
                     cur_data_dict = json.load(file)
+                    # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
                     rank0_print(f"Loaded {len(cur_data_dict)} samples from {full_path}")
                     self.list_data_dict.extend(cur_data_dict)
+        # 如果前面的条件不成立，再检查 `data_path.endswith(".yaml")` 这个分支。
         elif data_path.endswith(".yaml"):
             # YAML 模式允许把多个数据源混在一起，并指定各自采样策略。
+            # 使用上下文管理器安全地打开资源，结束后会自动清理。
             with open(data_path, "r") as file:
+                # 给 `yaml_data` 赋值：从 YAML 文件读取多数据源配置。
                 yaml_data = yaml.safe_load(file)
                 datasets = yaml_data.get("datasets")
                 # file should be in the format of:
@@ -1257,55 +1184,76 @@ class LazySupervisedDataset(Dataset):
                     sampling_strategy = dataset.get("sampling_strategy", "all")
                     sampling_number = None
 
+                    # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
                     rank0_print(f"Loading {json_path} with {sampling_strategy} sampling strategy")
 
                     if json_path.endswith(".jsonl"):
                         cur_data_dict = []
+                        # 使用上下文管理器安全地打开资源，结束后会自动清理。
                         with open(json_path, "r") as json_file:
                             for line in json_file:
                                 cur_data_dict.append(json.loads(line.strip()))
+                    # 如果前面的条件不成立，再检查 `json_path.endswith(".json")` 这个分支。
                     elif json_path.endswith(".json"):
+                        # 使用上下文管理器安全地打开资源，结束后会自动清理。
                         with open(json_path, "r") as json_file:
+                            # 给 `cur_data_dict` 赋值：从 JSON 文件一次性读入结构化样本。
                             cur_data_dict = json.load(json_file)
+                    # 当前面的条件都不成立时，执行这个兜底分支。
                     else:
+                        # 主动抛出异常，说明当前输入或状态不符合预期。
                         raise ValueError(f"Unsupported file type: {json_path}")
 
                     if ":" in sampling_strategy:
                         sampling_strategy, sampling_number = sampling_strategy.split(":")
                         if "%" in sampling_number:
+                            # 给 `sampling_number` 赋值：计算当前对象的长度。
                             sampling_number = math.ceil(int(sampling_number.split("%")[0]) * len(cur_data_dict) / 100)
+                        # 当前面的条件都不成立时，执行这个兜底分支。
                         else:
                             sampling_number = int(sampling_number)
 
                     # 根据 first/end/random 等策略对子数据集做裁剪。
                     if sampling_strategy == "first" and sampling_number is not None:
                         cur_data_dict = cur_data_dict[:sampling_number]
+                    # 如果前面的条件不成立，再检查 `sampling_strategy == "end" and sampling_number is not None` 这个分支。
                     elif sampling_strategy == "end" and sampling_number is not None:
                         cur_data_dict = cur_data_dict[-sampling_number:]
+                    # 如果前面的条件不成立，再检查 `sampling_strategy == "random" and sampling_number is not None` 这个分支。
                     elif sampling_strategy == "random" and sampling_number is not None:
                         random.shuffle(cur_data_dict)
                         cur_data_dict = cur_data_dict[:sampling_number]
 
+                    # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
                     rank0_print(f"Loaded {len(cur_data_dict)} samples from {json_path}")
                     self.list_data_dict.extend(cur_data_dict)
+        # 当前面的条件都不成立时，执行这个兜底分支。
         else:
             data_args.dataset_paths = [data_path]
+            # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
             rank0_print(f"Loading {data_path}")
+            # 使用上下文管理器安全地打开资源，结束后会自动清理。
             with open(data_path, "r") as file:
+                # 给 `cur_data_dict` 赋值：从 JSON 文件一次性读入结构化样本。
                 cur_data_dict = json.load(file)
+                # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
                 rank0_print(f"Loaded {len(cur_data_dict)} samples from {data_path}")
                 self.list_data_dict.extend(cur_data_dict)
 
+        # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
         rank0_print(f"Loaded {len(self.list_data_dict)} samples from {data_path}")
+        # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
         rank0_print("Formatting inputs...Skip in lazy mode")
         self.tokenizer = tokenizer
         self.data_args = data_args
 
+    # 定义函数 `__len__`，把一段可复用逻辑封装起来。
     def __len__(self):
         # 返回样本总数，供 DataLoader / Sampler 使用。
         return len(self.list_data_dict)
 
     @property
+    # 定义函数 `lengths`，把一段可复用逻辑封装起来。
     def lengths(self):
         # 给长度分组采样器一个粗粒度长度估计。
         length_list = []
@@ -1315,27 +1263,37 @@ class LazySupervisedDataset(Dataset):
         return length_list
 
     @property
+    # 定义函数 `modality_lengths`，把一段可复用逻辑封装起来。
     def modality_lengths(self):
         # 多模态样本记正值，纯文本样本记负值，便于按模态分桶采样。
         length_list = []
         for sample in self.list_data_dict:
+            # 给 `cur_len` 赋值：计算当前对象的长度。
             cur_len = sum(len(conv["value"].split()) for conv in sample["conversations"])
+            # 用断言强制检查一个前提条件，条件不满足就立即报错。
             assert cur_len > 0, f"Conversation length is 0 for {sample}"
             if "image" in sample or "video" in sample or self.data_args.early_mix_text:
                 length_list.append(cur_len)
+            # 当前面的条件都不成立时，执行这个兜底分支。
             else:
                 length_list.append(-cur_len)
         return length_list
 
+    # 定义函数 `process_image`，把一段可复用逻辑封装起来。
     def process_image(self, image_file, overwrite_image_aspect_ratio=None):
         # 按配置把单张图片转成模型实际接收的 pixel tensor。
         image_folder = self.data_args.image_folder
         processor = self.data_args.image_processor
         # print(f"\n\nInspecting the image path, folder = {image_folder}, image={image_file}\n\n")
+        # 尝试执行下面这段可能出错的逻辑。
         try:
+            # 给 `image` 赋值：从磁盘读取图片，并转成 PIL 图像对象。
             image = Image.open(os.path.join(image_folder, image_file)).convert("RGB")
+        # 如果上面的 try 出现异常，就走这个异常处理分支。
         except Exception as exn:
+            # 把关键信息打印到终端，便于调试或观察运行状态。
             print(f"Failed to open image {image_file}. Exception:", exn)
+            # 主动抛出异常，说明当前输入或状态不符合预期。
             raise exn
 
         image_size = image.size
@@ -1344,33 +1302,46 @@ class LazySupervisedDataset(Dataset):
             image_aspect_ratio = overwrite_image_aspect_ratio
         if image_aspect_ratio == "highres":
             # 高分辨率模式会把图像切成多块 patch。
+            # 给 `image` 赋值：按高分辨率模式把大图切成多个 patch，提高细节保留能力。
             image = process_highres_image(image, self.data_args.image_processor, self.data_args.image_grid_pinpoints)
+        # 如果前面的条件不成立，再检查 `image_aspect_ratio == "anyres" or "anyres_max" in image_aspect_ratio` 这个分支。
         elif image_aspect_ratio == "anyres" or "anyres_max" in image_aspect_ratio:
             # anyres 模式会根据原图比例选择最合适的 patch 网格。
+            # 给 `image` 赋值：按任意分辨率策略切图并编码，尽量保留原图比例信息。
             image = process_anyres_image(image, self.data_args.image_processor, self.data_args.image_grid_pinpoints)
+        # 如果前面的条件不成立，再检查 `image_aspect_ratio == "crop_split"` 这个分支。
         elif image_aspect_ratio == "crop_split":
+            # 给 `image` 赋值：按高分辨率模式把大图切成多个 patch，提高细节保留能力。
             image = process_highres_image_crop_split(image, self.data_args)
+        # 如果前面的条件不成立，再检查 `image_aspect_ratio == "pad"` 这个分支。
         elif image_aspect_ratio == "pad":
 
+            # 定义函数 `expand2square`，把一段可复用逻辑封装起来。
             def expand2square(pil_img, background_color):
                 width, height = pil_img.size
                 if width == height:
                     return pil_img
+                # 如果前面的条件不成立，再检查 `width > height` 这个分支。
                 elif width > height:
                     result = Image.new(pil_img.mode, (width, width), background_color)
                     result.paste(pil_img, (0, (width - height) // 2))
                     return result
+                # 当前面的条件都不成立时，执行这个兜底分支。
                 else:
                     result = Image.new(pil_img.mode, (height, height), background_color)
                     result.paste(pil_img, ((height - width) // 2, 0))
                     return result
 
             image = expand2square(image, tuple(int(x * 255) for x in processor.image_mean))
+            # 给 `image` 赋值：把图片或视频帧转换成视觉编码器可直接接收的像素张量。
             image = processor.preprocess(image, return_tensors="pt")["pixel_values"][0]
+        # 当前面的条件都不成立时，执行这个兜底分支。
         else:
+            # 给 `image` 赋值：把图片或视频帧转换成视觉编码器可直接接收的像素张量。
             image = processor.preprocess(image, return_tensors="pt")["pixel_values"][0]
         return image, image_size, "image"
 
+    # 定义函数 `__getitem__`，把一段可复用逻辑封装起来。
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         # 数据文件容易损坏，这里做多次重试，尽量避免单个坏样本中断整轮训练。
         # TODO: define number of retries somewhere else
@@ -1379,37 +1350,49 @@ class LazySupervisedDataset(Dataset):
 
         # try the current sample first
         for attempt_idx in range(num_base_retries):
+            # 尝试执行下面这段可能出错的逻辑。
             try:
                 sample = self._get_item(i)
                 return sample
+            # 如果上面的 try 出现异常，就走这个异常处理分支。
             except Exception as e:
                 # sleep 1s in case it is a cloud disk issue
+                # 把关键信息打印到终端，便于调试或观察运行状态。
                 print(f"[Try #{attempt_idx}] Failed to fetch sample {i}. Exception:", e)
                 time.sleep(1)
 
         # try other samples, in case it is file corruption issue
         for attempt_idx in range(num_base_retries):
+            # 尝试执行下面这段可能出错的逻辑。
             try:
+                # 给 `next_index` 赋值：计算当前对象的长度。
                 next_index = min(i + 1, len(self.list_data_dict) - 1)
                 # sample_idx = random.choice(range(len(self)))
                 sample = self._get_item(next_index)
                 return sample
+            # 如果上面的 try 出现异常，就走这个异常处理分支。
             except Exception as e:
                 # no need to sleep
+                # 把关键信息打印到终端，便于调试或观察运行状态。
                 print(f"[Try other #{attempt_idx}] Failed to fetch sample {next_index}. Exception:", e)
                 pass
 
+        # 尝试执行下面这段可能出错的逻辑。
         try:
             sample = self._get_item(i)
             return sample
+        # 如果上面的 try 出现异常，就走这个异常处理分支。
         except Exception as e:
+            # 主动抛出异常，说明当前输入或状态不符合预期。
             raise e
 
+    # 定义函数 `_get_item`，把一段可复用逻辑封装起来。
     def _get_item(self, i) -> Dict[str, torch.Tensor]:
         # 真正的单样本解析逻辑：读文本、读图片/视频、再统一做 token 化。
         sources = self.list_data_dict[i]
         if isinstance(i, int):
             sources = [sources]
+        # 用断言强制检查一个前提条件，条件不满足就立即报错。
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
 
         if "image" in sources[0]:
@@ -1422,33 +1405,43 @@ class LazySupervisedDataset(Dataset):
                 if len(image_file) > 1:
                     image = [self.process_image(f, "pad") for f in image_file]
                     image = [[im[0], im[1], "image"] for im in image]
+            # 当前面的条件都不成立时，执行这个兜底分支。
             else:
                 image = [self.process_image(image_file)]
+            # 给 `sources` 赋值：深拷贝一份对象，避免后续修改影响原始输入。
             sources = preprocess_multimodal(copy.deepcopy([e["conversations"] for e in sources]), self.data_args)
 
+        # 如果前面的条件不成立，再检查 `"video" in sources[0]` 这个分支。
         elif "video" in sources[0]:
             # 视频样本会先抽帧，再复用图像处理器做逐帧预处理。
             video_file = self.list_data_dict[i]["video"]
             video_folder = self.data_args.video_folder
+            # 给 `video_file` 赋值：拼接平台无关的文件路径。
             video_file = os.path.join(video_folder, video_file)
+            # 给 `suffix` 赋值：按分隔符把字符串拆成若干段，便于后续解析。
             suffix = video_file.split(".")[-1]
             if not os.path.exists(video_file):
+                # 把关键信息打印到终端，便于调试或观察运行状态。
                 print("File {} not exist!".format(video_file))
 
+            # 尝试执行下面这段可能出错的逻辑。
             try:
                 if "shareVideoGPTV" in video_file:
                     # shareVideoGPTV 是特殊存储格式：视频预先被解成了帧目录。
+                    # 给 `frame_files` 赋值：拼接平台无关的文件路径。
                     frame_files = [os.path.join(video_file, f) for f in os.listdir(video_file) if os.path.isfile(os.path.join(video_file, f))]
                     frame_files.sort()  # Ensure the frames are sorted if they are named sequentially
 
                     # TODO: Hard CODE: Determine the indices for uniformly sampling 10 frames
                     if self.data_args.force_sample:
                         num_frames_to_sample = self.data_args.frames_upbound
+                    # 当前面的条件都不成立时，执行这个兜底分支。
                     else:
                         num_frames_to_sample = 10
 
                     avg_fps = 2
 
+                    # 给 `total_frames` 赋值：计算当前对象的长度。
                     total_frames = len(frame_files)
                     sampled_indices = np.linspace(0, total_frames - 1, num_frames_to_sample, dtype=int)
 
@@ -1462,49 +1455,66 @@ class LazySupervisedDataset(Dataset):
                     video = []
                     for idx in sampled_indices:
                         frame_path = frame_files[idx]
+                        # 尝试执行下面这段可能出错的逻辑。
                         try:
+                            # 使用上下文管理器安全地打开资源，结束后会自动清理。
                             with Image.open(frame_path) as img:
                                 frame = img.convert("RGB")
                                 video.append(frame)
+                        # 如果上面的 try 出现异常，就走这个异常处理分支。
                         except IOError:
+                            # 把关键信息打印到终端，便于调试或观察运行状态。
                             print(f"Failed to read frame at path: {frame_path}")
+                # 当前面的条件都不成立时，执行这个兜底分支。
                 else:
                     # 普通视频文件走 decord 抽帧逻辑。
                     video, video_time, frame_time, num_frames_to_sample = process_video_with_decord(video_file, self.data_args)
 
                 processor = self.data_args.image_processor
+                # 给 `image` 赋值：把图片或视频帧转换成视觉编码器可直接接收的像素张量。
                 image = processor.preprocess(video, return_tensors="pt")["pixel_values"]
                 if self.data_args.add_time_instruction:
                     # 可选地把视频时长与采样帧时间写入首轮提示词。
                     time_instruciton = f"The video lasts for {video_time:.2f} seconds, and {num_frames_to_sample} frames are uniformly sampled from it. These frames are located at {frame_time}.Please answer the following questions related to this video."
                     sources[0]["conversations"][0]["value"] = f'{DEFAULT_IMAGE_TOKEN}\n{time_instruciton}\n{sources[0]["conversations"][0]["value"].replace(DEFAULT_IMAGE_TOKEN, "")}'
                 image = [(image, video[0].size, "video")]
+                # 给 `sources` 赋值：深拷贝一份对象，避免后续修改影响原始输入。
                 sources = preprocess_multimodal(copy.deepcopy([e["conversations"] for e in sources]), self.data_args)
                 # print(sources)
+            # 如果上面的 try 出现异常，就走这个异常处理分支。
             except Exception as e:
+                # 把关键信息打印到终端，便于调试或观察运行状态。
                 print(f"Error: {e}")
+                # 把关键信息打印到终端，便于调试或观察运行状态。
                 print(f"Failed to read video file: {video_file}")
                 return self._get_item(i + 1)
+        # 当前面的条件都不成立时，执行这个兜底分支。
         else:
+            # 给 `sources` 赋值：深拷贝一份对象，避免后续修改影响原始输入。
             sources = copy.deepcopy([e["conversations"] for e in sources])
 
         # 对于训练代码而言，视频和图像都走 has_image=True 这条多模态分支。
         has_image = ("image" in self.list_data_dict[i]) or ("video" in self.list_data_dict[i])
+        # 把当前样本处理结果整理成字典，便于后续统一传递。
         data_dict = preprocess(sources, self.tokenizer, has_image=has_image)
 
         if "prompt" in data_dict:
             prompt = data_dict["prompt"]
+        # 当前面的条件都不成立时，执行这个兜底分支。
         else:
             prompt = None
 
         if isinstance(i, int):
+            # 把当前样本处理结果整理成字典，便于后续统一传递。
             data_dict = dict(input_ids=data_dict["input_ids"][0], labels=data_dict["labels"][0])
 
         # 把模态张量塞回 data_dict，供 collator 聚合成 batch。
         if "image" in self.list_data_dict[i]:
             data_dict["image"] = image
+        # 如果前面的条件不成立，再检查 `"video" in self.list_data_dict[i]` 这个分支。
         elif "video" in self.list_data_dict[i]:
             data_dict["image"] = image
+        # 如果前面的条件不成立，再检查 `self.data_args.is_multimodal` 这个分支。
         elif self.data_args.is_multimodal:
             # image does not exist in the data, but the model is multimodal
             crop_size = self.data_args.image_processor.crop_size
@@ -1520,12 +1530,16 @@ class LazySupervisedDataset(Dataset):
         return data_dict
 
 
+# 把下面这个类声明成 dataclass，自动生成初始化方法，方便承载配置。
 @dataclass
+# 定义类 `DataCollatorForSupervisedDataset`，把同一类配置或逻辑组织到一起。
 class DataCollatorForSupervisedDataset(object):
+    # 文档字符串：说明下面这个函数或代码块的用途。
     """Collate examples for supervised fine-tuning."""
 
     tokenizer: transformers.PreTrainedTokenizer
 
+    # 定义函数 `pad_sequence`，把一段可复用逻辑封装起来。
     def pad_sequence(self, input_ids, batch_first, padding_value):
         # 兼容 left padding 和 right padding 两种 tokenizer 行为。
         if self.tokenizer.padding_side == "left":
@@ -1535,6 +1549,7 @@ class DataCollatorForSupervisedDataset(object):
             input_ids = torch.flip(input_ids, [1])
         return input_ids
 
+    # 定义函数 `__call__`，把一段可复用逻辑封装起来。
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         # 把若干条样本拼成一个 batch，并同步整理图像/视频张量。
         input_ids, labels = tuple([instance[key] for instance in instances] for key in ("input_ids", "labels"))
@@ -1571,20 +1586,28 @@ class DataCollatorForSupervisedDataset(object):
         return batch
 
 
+# 定义函数 `make_supervised_data_module`，把一段可复用逻辑封装起来。
 def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, data_args) -> Dict:
+    # 文档字符串：说明下面这个函数或代码块的用途。
     """Make dataset and collator for supervised fine-tuning."""
     # 返回 Trainer 需要的标准数据模块。
+    # 给 `train_dataset` 赋值：实例化惰性加载的数据集，样本会在取用时才做预处理。
     train_dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, data_args=data_args)
+    # 给 `data_collator` 赋值：实例化 batch 拼接器，把单条样本整理成训练批次。
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
     return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
 
 
+# 定义函数 `get_model`，把一段可复用逻辑封装起来。
 def get_model(model_args, training_args, bnb_model_from_pretrained_args):
     # 根据底座模型名称、视觉塔配置和量化配置构建最终模型实例。
+    # 用断言强制检查一个前提条件，条件不满足就立即报错。
     assert training_args.attn_implementation
     if training_args.attn_implementation == "sdpa" and torch.__version__ < "2.1.2":
+        # 主动抛出异常，说明当前输入或状态不符合预期。
         raise ValueError("The 'sdpa' attention implementation requires torch version 2.1.2 or higher.")
 
+    # 给 `customized_kwargs` 赋值：构造一个字典，把相关结果打包返回。
     customized_kwargs = dict()
     customized_kwargs.update(bnb_model_from_pretrained_args)
     cfg_pretrained = None
@@ -1601,6 +1624,7 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
             model_args.mm_resampler_type is not None,
         ]
     ):
+        # 给 `cfg_pretrained` 赋值：读取预训练模型的配置文件，便于在加载前覆写配置项。
         cfg_pretrained = AutoConfig.from_pretrained(model_args.model_name_or_path)
 
     if model_args.use_pos_skipping is not None and model_args.pos_skipping_range is not None:
@@ -1615,6 +1639,7 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
         if training_args.model_max_length is None:
             training_args.model_max_length = cfg_pretrained.max_position_embeddings * model_args.rope_scaling_factor
             overwrite_config["max_sequence_length"] = training_args.model_max_length
+        # 用断言强制检查一个前提条件，条件不满足就立即报错。
         assert training_args.model_max_length == int(cfg_pretrained.max_position_embeddings * model_args.rope_scaling_factor), print(
             f"model_max_length: {training_args.model_max_length}, max_position_embeddings: {cfg_pretrained.max_position_embeddings}, rope_scaling_factor: {model_args.rope_scaling_factor}"
         )
@@ -1632,8 +1657,10 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
 
     if overwrite_config:
         # 如果用户指定了 rope/pool/resampler 等参数，就在加载前注入 config。
+        # 用断言强制检查一个前提条件，条件不满足就立即报错。
         assert cfg_pretrained is not None, "cfg_pretrained is None"
 
+        # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
         rank0_print(f"Overwriting config with {overwrite_config}")
         for k, v in overwrite_config.items():
             setattr(cfg_pretrained, k, v)
@@ -1644,7 +1671,9 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
         # 用户显式指定模型类时，直接按类名实例化。
         actual_model_class_name = f"{model_args.model_class_name}ForCausalLM"
         model_class = getattr(transformers, actual_model_class_name)
+        # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
         rank0_print(f"Using model class {model_class} from {model_args.model_class_name}")
+        # 从预训练权重初始化模型或 tokenizer。
         model = model_class.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
@@ -1653,9 +1682,11 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
             low_cpu_mem_usage=False,
             **customized_kwargs,
         )
+    # 如果前面的条件不成立，再检查 `model_args.vision_tower is not None` 这个分支。
     elif model_args.vision_tower is not None:
         # 常见路径：根据底座类型构建带视觉塔的 LlavaXXXForCausalLM。
         if "mixtral" in model_args.model_name_or_path.lower():
+            # 从预训练权重初始化模型或 tokenizer。
             model = LlavaMixtralForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
@@ -1667,7 +1698,9 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
             from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
             deepspeed.utils.set_z3_leaf_modules(model, [MixtralSparseMoeBlock])
+        # 如果前面的条件不成立，再检查 `"mistral" in model_args.model_name_or_path.lower() or "zephyr" in model_args.model_name_or_path.lower()` 这个分支。
         elif "mistral" in model_args.model_name_or_path.lower() or "zephyr" in model_args.model_name_or_path.lower():
+            # 从预训练权重初始化模型或 tokenizer。
             model = LlavaMistralForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
@@ -1676,6 +1709,7 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
                 low_cpu_mem_usage=False,
                 **customized_kwargs,
             )
+        # 如果前面的条件不成立，再检查 `(` 这个分支。
         elif (
             "wizardlm-2" in model_args.model_name_or_path.lower()
             or "vicuna" in model_args.model_name_or_path.lower()
@@ -1684,6 +1718,7 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
             or "nous-hermes" in model_args.model_name_or_path.lower()
             and "wizard-2" in model_args.model_name_or_path.lower()
         ):
+            # 从预训练权重初始化模型或 tokenizer。
             model = LlavaLlamaForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
@@ -1692,8 +1727,10 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
                 low_cpu_mem_usage=False,
                 **customized_kwargs,
             )
+        # 如果前面的条件不成立，再检查 `"qwen" in model_args.model_name_or_path.lower()` 这个分支。
         elif "qwen" in model_args.model_name_or_path.lower():
             if "moe" in model_args.model_name_or_path.lower() or "A14B" in model_args.model_name_or_path:
+                # 从预训练权重初始化模型或 tokenizer。
                 model = LlavaQwenMoeForCausalLM.from_pretrained(
                     model_args.model_name_or_path,
                     cache_dir=training_args.cache_dir,
@@ -1705,7 +1742,9 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
                 from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeSparseMoeBlock
 
                 deepspeed.utils.set_z3_leaf_modules(model, [Qwen2MoeSparseMoeBlock])
+            # 当前面的条件都不成立时，执行这个兜底分支。
             else:
+                # 从预训练权重初始化模型或 tokenizer。
                 model = LlavaQwenForCausalLM.from_pretrained(
                     model_args.model_name_or_path,
                     cache_dir=training_args.cache_dir,
@@ -1714,7 +1753,9 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
                     low_cpu_mem_usage=False,
                     **customized_kwargs,
                 )
+        # 如果前面的条件不成立，再检查 `"gemma" in model_args.model_name_or_path.lower()` 这个分支。
         elif "gemma" in model_args.model_name_or_path.lower():
+            # 从预训练权重初始化模型或 tokenizer。
             model = LlavaGemmaForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
@@ -1723,10 +1764,14 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
                 low_cpu_mem_usage=False,
                 **customized_kwargs,
             )
+        # 当前面的条件都不成立时，执行这个兜底分支。
         else:
+            # 主动抛出异常，说明当前输入或状态不符合预期。
             raise ValueError(f"Unknown model class {model_args}")
+    # 当前面的条件都不成立时，执行这个兜底分支。
     else:
         # 没有视觉塔时退化成纯语言模型。
+        # 从预训练权重初始化模型或 tokenizer。
         model = transformers.LlamaForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
@@ -1738,6 +1783,7 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
     return model
 
 
+# 定义函数 `train`，把一段可复用逻辑封装起来。
 def train(attn_implementation=None):
     # 整个训练脚本的真正入口。
     global local_rank
@@ -1747,13 +1793,16 @@ def train(attn_implementation=None):
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     if training_args.verbose_logging:
+        # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
         rank0_print(f"Inspecting experiment hyperparameters:\n")
+        # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
         rank0_print(f"model_args = {vars(model_args)}\n\n")
+        # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
         rank0_print(f"data_args = {vars(data_args)}\n\n")
+        # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
         rank0_print(f"training_args = {vars(training_args)}\n\n")
         # rank0_print(f"evaluation_args = {vars(evaluation_args)}\n\n")
 
-    # 记录当前进程在分布式训练中的 rank，并推导计算 dtype。
     local_rank = training_args.local_rank
     compute_dtype = torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32)
 
@@ -1767,6 +1816,7 @@ def train(attn_implementation=None):
                 device_map={"": training_args.device},
                 load_in_4bit=training_args.bits == 4,
                 load_in_8bit=training_args.bits == 8,
+                # 给 `quantization_config` 赋值：定义 4bit/8bit 量化加载参数，减少显存占用。
                 quantization_config=BitsAndBytesConfig(
                     load_in_4bit=training_args.bits == 4,
                     load_in_8bit=training_args.bits == 8,
@@ -1780,6 +1830,7 @@ def train(attn_implementation=None):
         )
 
     # 构建模型并关闭 use_cache，避免训练时缓存 KV 浪费显存。
+    # 从预训练权重初始化模型或 tokenizer。
     model = get_model(model_args, training_args, bnb_model_from_pretrained_args)
     model.config.use_cache = False
     if model_args.rope_scaling_factor is not None and model_args.rope_scaling_type is not None:
@@ -1797,14 +1848,17 @@ def train(attn_implementation=None):
         from peft import prepare_model_for_kbit_training
 
         model.config.torch_dtype = torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32)
+        # 把量化模型调整成可训练形态，避免低比特训练出问题。
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=training_args.gradient_checkpointing)
 
     if training_args.gradient_checkpointing:
         # 开启 gradient checkpointing 时，确保输入 embedding 支持梯度回传。
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
+        # 当前面的条件都不成立时，执行这个兜底分支。
         else:
 
+            # 定义函数 `make_inputs_require_grad`，把一段可复用逻辑封装起来。
             def make_inputs_require_grad(module, input, output):
                 output.requires_grad_(True)
 
@@ -1814,9 +1868,11 @@ def train(attn_implementation=None):
         # 如果启用 LoRA，就在语言模型线性层上挂低秩适配器。
         from peft import LoraConfig, get_peft_model
 
+        # 给 `lora_config` 赋值：定义 LoRA 低秩适配器的超参数。
         lora_config = LoraConfig(
             r=training_args.lora_r,
             lora_alpha=training_args.lora_alpha,
+            # 给 `target_modules` 赋值：扫描模型里的线性层名称，作为 LoRA 的目标模块集合。
             target_modules=find_all_linear_names(model),
             lora_dropout=training_args.lora_dropout,
             bias=training_args.lora_bias,
@@ -1827,14 +1883,20 @@ def train(attn_implementation=None):
                 model.to(torch.bfloat16)
             if training_args.fp16:
                 model.to(torch.float16)
+        # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
         rank0_print("Adding LoRA adapters...")
+        # 把 LoRA 适配器挂到基础模型上。
         model = get_peft_model(model, lora_config)
 
     # 不同底座模型对 padding side 的偏好不同，这里分别处理 tokenizer。
     if "mistral" in model_args.model_name_or_path.lower() or "mixtral" in model_args.model_name_or_path.lower() or "zephyr" in model_args.model_name_or_path.lower():
+        # 从预训练权重初始化模型或 tokenizer。
         tokenizer = transformers.AutoTokenizer.from_pretrained(model_args.model_name_or_path, cache_dir=training_args.cache_dir, model_max_length=training_args.model_max_length, padding_side="left")
+    # 如果前面的条件不成立，再检查 `"qwen" in model_args.model_name_or_path.lower()` 这个分支。
     elif "qwen" in model_args.model_name_or_path.lower():
+        # 从预训练权重初始化模型或 tokenizer。
         tokenizer = transformers.AutoTokenizer.from_pretrained(model_args.model_name_or_path, cache_dir=training_args.cache_dir, model_max_length=training_args.model_max_length, padding_side="right")
+    # 如果前面的条件不成立，再检查 `(` 这个分支。
     elif (
         "wizardlm-2" in model_args.model_name_or_path.lower()
         or "vicuna" in model_args.model_name_or_path.lower()
@@ -1843,6 +1905,7 @@ def train(attn_implementation=None):
         or "nous-hermes" in model_args.model_name_or_path.lower()
         and "wizard-2" in model_args.model_name_or_path.lower()
     ):
+        # 从预训练权重初始化模型或 tokenizer。
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
@@ -1851,23 +1914,28 @@ def train(attn_implementation=None):
             use_fast=False,
         )
 
+    # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
     rank0_print(f"Prompt version: {model_args.version}")
     if model_args.version == "v0":
         # 旧版模板如果没有 pad token，就手动补一个并同步扩展 embedding。
         if tokenizer.pad_token is None:
             smart_tokenizer_and_embedding_resize(
+                # 给 `special_tokens_dict` 赋值：构造一个字典，把相关结果打包返回。
                 special_tokens_dict=dict(pad_token="[PAD]"),
                 tokenizer=tokenizer,
                 model=model,
             )
+    # 如果前面的条件不成立，再检查 `model_args.version == "v0.5"` 这个分支。
     elif model_args.version == "v0.5":
         tokenizer.pad_token = tokenizer.unk_token
+    # 当前面的条件都不成立时，执行这个兜底分支。
     else:
         # 新版模板通常直接复用 unk 作为 pad，并选择对应的 conversation template。
         if tokenizer.unk_token is not None:
             tokenizer.pad_token = tokenizer.unk_token
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
+        # 当前面的条件都不成立时，执行这个兜底分支。
         else:
             conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
 
@@ -1887,20 +1955,26 @@ def train(attn_implementation=None):
         if data_args.image_grid_pinpoints is not None:
             # 支持把 `(1x1),...,(6x6)` 这种字符串展开成具体的 patch 网格列表。
             if isinstance(data_args.image_grid_pinpoints, str) and "x" in data_args.image_grid_pinpoints:
+                # 尝试执行下面这段可能出错的逻辑。
                 try:
                     patch_size = data_args.image_processor.size[0]
+                # 如果上面的 try 出现异常，就走这个异常处理分支。
                 except Exception as e:
                     patch_size = data_args.image_processor.size["shortest_edge"]
 
+                # 用断言强制检查一个前提条件，条件不满足就立即报错。
                 assert patch_size in [224, 336, 384, 448, 512], "patch_size should be in [224, 336, 384, 448, 512]"
                 # Use regex to extract the range from the input string
+                # 给 `matches` 赋值：用正则解析字符串里的结构化信息。
                 matches = re.findall(r"\((\d+)x(\d+)\)", data_args.image_grid_pinpoints)
                 range_start = tuple(map(int, matches[0]))
                 range_end = tuple(map(int, matches[-1]))
                 # Generate a matrix of tuples from (range_start[0], range_start[1]) to (range_end[0], range_end[1])
+                # 给 `grid_pinpoints` 赋值：生成整数序列，供循环使用。
                 grid_pinpoints = [(i, j) for i in range(range_start[0], range_end[0] + 1) for j in range(range_start[1], range_end[1] + 1)]
                 # Multiply all elements by patch_size
                 data_args.image_grid_pinpoints = [[dim * patch_size for dim in pair] for pair in grid_pinpoints]
+            # 如果前面的条件不成立，再检查 `isinstance(data_args.image_grid_pinpoints, str)` 这个分支。
             elif isinstance(data_args.image_grid_pinpoints, str):
                 data_args.image_grid_pinpoints = ast.literal_eval(data_args.image_grid_pinpoints)
 
@@ -1943,10 +2017,13 @@ def train(attn_implementation=None):
             model.config.unfreeze_mm_vision_tower = model_args.unfreeze_mm_vision_tower
             if model_args.unfreeze_mm_vision_tower:
                 vision_tower.requires_grad_(True)
+            # 当前面的条件都不成立时，执行这个兜底分支。
             else:
                 vision_tower.requires_grad_(False)
 
+        # 当前面的条件都不成立时，执行这个兜底分支。
         else:
+            # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
             rank0_print(f"Using mm_tunable_parts: {model_args.mm_tunable_parts}")
             model.config.mm_tunable_parts = training_args.mm_tunable_parts = model_args.mm_tunable_parts
             # Set the entire model to not require gradients by default
@@ -1955,6 +2032,7 @@ def train(attn_implementation=None):
             model.get_model().mm_projector.requires_grad_(False)
             model.get_model().vision_resampler.requires_grad_(False)
             # Parse the mm_tunable_parts to decide which parts to unfreeze
+            # 给 `tunable_parts` 赋值：按分隔符把字符串拆成若干段，便于后续解析。
             tunable_parts = model_args.mm_tunable_parts.split(",")
             if "mm_mlp_adapter" in tunable_parts:
                 for p in model.get_model().mm_projector.parameters():
@@ -1971,10 +2049,14 @@ def train(attn_implementation=None):
                     if "vision_tower" not in name and "mm_projector" not in name and "vision_resampler" not in name:
                         param.requires_grad_(True)
 
+        # 给 `total_params` 赋值：统计模型参数量，便于核对当前训练规模。
         total_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters())
+        # 给 `trainable_params` 赋值：统计模型参数量，便于核对当前训练规模。
         trainable_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters() if p.requires_grad)
         # 输出总参数量和可训练参数量，方便确认当前训练策略是否符合预期。
+        # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
         rank0_print(f"Total parameters: ~{total_params/1e6:.2f} MB)")
+        # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
         rank0_print(f"Trainable parameters: ~{trainable_params/1e6:.2f} MB)")
         if training_args.bits in [4, 8]:
             model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
@@ -1994,24 +2076,32 @@ def train(attn_implementation=None):
         for name, module in model.named_modules():
             if isinstance(module, LoraLayer):
                 if training_args.bf16:
+                    # 给 `module` 赋值：把张量或模块移动到指定设备/精度。
                     module = module.to(torch.bfloat16)
             if "norm" in name:
+                # 给 `module` 赋值：把张量或模块移动到指定设备/精度。
                 module = module.to(torch.float32)
             if "lm_head" in name or "embed_tokens" in name:
                 if hasattr(module, "weight"):
                     if training_args.bf16 and module.weight.dtype == torch.float32:
+                        # 给 `module` 赋值：把张量或模块移动到指定设备/精度。
                         module = module.to(torch.bfloat16)
 
     # 构建数据模块并实例化自定义 Trainer。
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
+    # 给 `trainer` 赋值：实例化自定义 Trainer，负责训练循环、保存和采样逻辑。
     trainer = LLaVATrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         # 输出目录里已有 checkpoint 时，自动从最近中断位置恢复。
+        # 启动 Trainer 的训练循环，内部会执行前向、反向传播和参数更新。
         trainer.train(resume_from_checkpoint=True)
+    # 当前面的条件都不成立时，执行这个兜底分支。
     else:
+        # 启动 Trainer 的训练循环，内部会执行前向、反向传播和参数更新。
         trainer.train()
     # 保存 Trainer 的状态信息，例如 optimizer / scheduler / rng state。
+    # 保存 Trainer 的运行状态，便于下次从断点继续训练。
     trainer.save_state()
 
     # 训练完成后恢复 use_cache，便于后续推理。
@@ -2023,15 +2113,21 @@ def train(attn_implementation=None):
         non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(model.named_parameters())
         if training_args.local_rank == 0 or training_args.local_rank == -1:
             if hasattr(model, "config"):
+                # 把模型配置单独保存下来，保证之后能正确恢复结构。
                 model.config.save_pretrained(training_args.output_dir)
             if hasattr(model, "generation_config"):
+                # 把生成配置保存下来，保证推理参数可复现。
                 model.generation_config.save_pretrained(training_args.output_dir)
+            # 把模型按 Hugging Face 约定格式保存，方便后续加载。
             model.save_pretrained(training_args.output_dir, state_dict=state_dict)
+            # 把当前张量或权重保存到磁盘文件。
             torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, "non_lora_trainables.bin"))
+    # 当前面的条件都不成立时，执行这个兜底分支。
     else:
         # 全量或 adapter 训练走统一的安全保存逻辑。
         safe_save_model_for_hf_trainer(trainer=trainer, output_dir=training_args.output_dir)
 
+    # 只让主进程打印日志，避免多卡训练时重复输出相同信息。
     rank0_print(f"Model saved to {training_args.output_dir}")
 
 
