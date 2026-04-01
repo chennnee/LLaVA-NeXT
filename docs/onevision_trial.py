@@ -21,7 +21,7 @@ tokenizer, model, image_processor, max_length = load_pretrained_model(pretrained
 
 model.eval()
 
-url = "https://github.com/haotian-liu/LLaVA/blob/1a91fc274d7c35a9b50b3cb29c4247ae5837ce39/images/llava_v1_5_radar.jpg?raw=true"
+url = "/datachen/250010092/ChenHongjun/LLaVA-NeXT/hitpic.jpeg"
 image = Image.open(requests.get(url, stream=True).raw)
 image_tensor = process_images([image], image_processor, model.config)
 image_tensor = [_image.to(dtype=torch.float16, device=device) for _image in image_tensor]
@@ -52,7 +52,7 @@ from threading import Thread
 from transformers import TextIteratorStreamer
 import json
 
-url = "https://github.com/haotian-liu/LLaVA/blob/1a91fc274d7c35a9b50b3cb29c4247ae5837ce39/images/llava_v1_5_radar.jpg?raw=true"
+url = "/datachen/250010092/ChenHongjun/LLaVA-NeXT/hitpic.jpeg"
 image = Image.open(requests.get(url, stream=True).raw)
 image_tensor = process_images([image], image_processor, model.config)
 image_tensor = [_image.to(dtype=torch.float16, device=device) for _image in image_tensor]
