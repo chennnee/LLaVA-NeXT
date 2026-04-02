@@ -42,7 +42,7 @@ class LlavaMetaModel:
             delay_load = getattr(config, "delay_load", False)
             self.vision_tower = build_vision_tower(config, delay_load=delay_load)
             self.vision_resampler = build_vision_resampler(config, vision_tower=self.vision_tower)
-            self.mm_projector = build_vision_projector(config, vision_cfg=self.vision_tower.config)
+            self.mm_projector  = build_vision_projector(config, vision_cfg=self.vision_tower.config)
 
             if "unpad" in getattr(config, "mm_patch_merge_type", ""):
                 self.image_newline = nn.Parameter(torch.empty(config.hidden_size, dtype=self.dtype))

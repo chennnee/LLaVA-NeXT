@@ -114,7 +114,6 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             # 把隐藏状态映射成词表 logits，交给上层 DPO 代码自己计算偏好损失。
             logits = self.lm_head(hidden_states)
             return logits, labels
-
         else:
             # 常规 SFT / 推理前向仍然复用 Qwen2ForCausalLM 的标准实现。
             return super().forward(
